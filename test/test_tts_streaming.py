@@ -18,17 +18,6 @@ audio_stream = client.text_to_speech.convert(
     output_format="pcm_24000"
 )
 
-'''
-#TTS 음성을 파일로 저장
-
-with open("test_output.mp3", "wb") as f:
-    for chunk in audio:
-        f.write(chunk)
-
-print("저장이 완료되었습니다. 파일을 확인하세요.")        
-
-'''
-
 p = pyaudio.PyAudio()
 stream = p.open(
     format=pyaudio.paInt16,
