@@ -1,3 +1,7 @@
 venv/
 .env
 Experiment1_Plan.md
+__pycache__/
+*.pyc
+*.pyo
+*.pcm
