@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 
 from server import experiment_pipeline, metrics_server
+from server import logger as result_logger
 
 logger = logging.getLogger(__name__)
 
@@ -137,3 +138,7 @@ async def websocket_endpoint(
     finally:
         # 어떤 형태의 종료든 반드시 활성화 집합에서 제거 (메모리 누수 방지)
         manager.disconnect(websocket)
+
+        # 이번 연결에서 누적된 서버 지표를 파일로 내보냄
+        # 실험 2·3에서는 여기서 client_metrics도 함께 전달하도록 수정 예정
+        result_logger.export(experiment=experiment)

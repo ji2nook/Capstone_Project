@@ -1,6 +1,12 @@
 # 디버깅용 WebSocket 테스트 클라이언트
-# 사용법: python test_ws.py
+# 사용법: python test/server/test_ws.py
 # 서버(python -m server.main)가 먼저 실행 중이어야 한다
+
+import sys
+from pathlib import Path
+
+# 프로젝트 루트를 sys.path에 추가해 'server' 패키지를 찾을 수 있게 함
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import asyncio
 import websockets
