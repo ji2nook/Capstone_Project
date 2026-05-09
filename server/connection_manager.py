@@ -1,11 +1,14 @@
 # WebSocket 연결 관리 및 FastAPI 앱 설정
 
+import json
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 
-from server import experiment_pipeline, metrics_server
+from server import api_manager, experiment_pipeline, metrics_server
 from server import logger as result_logger
+from server.logger import ClientMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +17,13 @@ logger = logging.getLogger(__name__)
 # FastAPI 앱 인스턴스
 # ========================================
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await api_manager.warmup()
+    yield
+
 # main.py가 이 객체를 import해서 uvicorn으로 전송
-app = FastAPI(title="Capstone Pipeline Server")
+app = FastAPI(title="Capstone Pipeline Server", lifespan=lifespan)
 
 
 # ========================================
@@ -23,7 +31,7 @@ app = FastAPI(title="Capstone Pipeline Server")
 # ========================================
 
 class ConnectionManager:
-    """WebSocket 연결 생명주기와 데이터 전송을 관리한다."""
+    #WebSocket 연결 생명주기와 데이터 전송 관리
 
     def __init__(self) -> None:
         # 현재 활성화된 WebSocket 집합
@@ -91,6 +99,9 @@ async def websocket_endpoint(
     # 클라이언트 연결을 수락하고 선택된 파이프라인 반복 실행
     await manager.connect(websocket)
 
+    # 이 연결에서 수신한 클라이언트 지표를 누적 (export 시 서버 지표와 1:1 병합)
+    client_metrics_list: list[ClientMetrics] = []
+
     try:
         # 하나의 연결에서 여러 프롬프트를 연속 처리할 수 있도록 루프로 구성
         while True:
@@ -105,9 +116,23 @@ async def websocket_endpoint(
             if experiment == "sequential":
                 result = await experiment_pipeline.run_sequential(prompt)
                 
-                metrics_server.record(result.metrics, experiment="sequential")
+                metrics_server.record(
+                    result.metrics,
+                    experiment="sequential",
+                    prompt=result.prompt,
+                    llm_response=result.llm_response,
+                )
                 
                 await manager.send_bytes(websocket, result.audio_bytes)
+
+                # 오디오 전송 후 클라이언트가 역전송한 지표 JSON을 수신
+                try:
+                    raw = await websocket.receive_text()
+                    data = json.loads(raw)
+                    client_metrics_list.append(ClientMetrics(**data))
+                    logger.info("[sequential] 클라이언트 지표 수신 완료")
+                except Exception:
+                    logger.warning("[sequential] 클라이언트 지표 수신 실패 — null로 기록됩니다")
 
             # ------------------------------
             # 실험 2: 스트리밍 파이프라인 (미구현)
@@ -139,6 +164,8 @@ async def websocket_endpoint(
         # 어떤 형태의 종료든 반드시 활성화 집합에서 제거 (메모리 누수 방지)
         manager.disconnect(websocket)
 
-        # 이번 연결에서 누적된 서버 지표를 파일로 내보냄
-        # 실험 2·3에서는 여기서 client_metrics도 함께 전달하도록 수정 예정
-        result_logger.export(experiment=experiment)
+        # 서버 지표와 클라이언트 지표를 병합해 파일로 내보냄
+        result_logger.export(
+            experiment=experiment,
+            client_metrics=client_metrics_list or None,
+        )

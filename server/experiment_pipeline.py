@@ -44,6 +44,8 @@ class PipelineResult:
     # 파이프라인 실행 결과: 클라이언트로 전송할 오디오 데이터와 성능 지표
     audio_bytes: bytes   # 최종 PCM 오디오 바이트 (클라이언트에 그대로 전송)
     metrics: BaseMetrics # 이 실행에서 측정한 성능 지표 (실험별 서브클래스로 전달됨)
+    prompt: str          # 사용자 입력 프롬프트
+    llm_response: str    # LLM이 생성한 텍스트 응답
 
 
 # ========================================
@@ -119,4 +121,9 @@ async def run_sequential(prompt: str) -> PipelineResult:
     # 오디오 바이트와 성능 지표를 PipelineResult에 묶어 반환
     # 오디오 바이트는 connection_manager를 통해 WebSocket으로 전송
     # 성능 지표는 connection_manager를 통해 metrics_server로 전달
-    return PipelineResult(audio_bytes=audio_bytes, metrics=metrics)
+    return PipelineResult(
+        audio_bytes=audio_bytes,
+        metrics=metrics,
+        prompt=prompt,
+        llm_response=text,
+    )

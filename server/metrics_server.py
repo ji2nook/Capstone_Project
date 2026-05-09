@@ -19,6 +19,8 @@ class MetricRecord:
     # logger.py에서 이 객체를 JSON/CSV로 직렬화
     timestamp: str      # 기록 시각
     experiment: str     # 실험 파이프라인 식별자 ("sequential" / "streaming" / "adaptive")
+    prompt: str         # 사용자 입력 프롬프트
+    llm_response: str   # LLM이 생성한 텍스트 응답
     llm_latency: float  # LLM API 소요 시간 (ms)
     tts_latency: float  # TTS API 소요 시간 (ms)
     e2e_latency: float  # 서버 측 E2E Latency (ms)
@@ -40,10 +42,17 @@ _records: list[MetricRecord] = []
 # ========================================
 
 # 메모리에 성능 지표 추가
-def record(metrics: BaseMetrics, experiment: str = "sequential") -> None:
+def record(
+    metrics: BaseMetrics,
+    experiment: str = "sequential",
+    prompt: str = "",
+    llm_response: str = "",
+) -> None:
     entry = MetricRecord(
         timestamp=datetime.now(tz=timezone.utc).isoformat(),
         experiment=experiment,
+        prompt=prompt,
+        llm_response=llm_response,
         llm_latency=metrics.llm_latency,
         tts_latency=metrics.tts_latency,
         e2e_latency=metrics.e2e_latency,

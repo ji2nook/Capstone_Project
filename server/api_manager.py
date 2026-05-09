@@ -85,7 +85,6 @@ async def synthesize_full_audio(text: str) -> bytes:
     return audio_bytes
 
 
-
 # ========================================
 # 스트리밍 처리 함수 (실험 2)
 # ========================================
@@ -96,3 +95,20 @@ async def synthesize_full_audio(text: str) -> bytes:
 # ========================================
 # 적응형 스트리밍 처리 함수 (실험 3)
 # ========================================
+
+
+
+
+
+
+# ========================================
+# 워밍업 함수
+# ========================================
+
+async def warmup() -> None:
+    # 서버 시작 시 LLM/TTS API와 미리 연결하여 초기 연결의 긴 대기시간 제거
+    logger.info("API 워밍업 시작")
+    text = await generate_full_response("안녕")
+    await synthesize_full_audio(text)
+    logger.info("API 워밍업 완료")
+
