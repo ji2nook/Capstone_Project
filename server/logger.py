@@ -8,7 +8,6 @@ from pathlib import Path
 
 from server import metrics_server
 from server.metrics_server import MetricRecord
-from server.mos_evaluator import MOSEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -40,29 +39,6 @@ class ClientMetrics:
 # ========================================
 # 내부 유틸리티
 # ========================================
-
-def _evaluate_mos(records: list[MetricRecord]) -> None:
-    pending = [r for r in records if r.utmos is None and r.audio_path]
-    if not pending:
-        return
-
-    logger.info("MOS 평가 시작: %d건", len(pending))
-    evaluator = MOSEvaluator()
-    for i, rec in enumerate(pending, 1):
-        logger.info("MOS 평가 중 (%d/%d): %s", i, len(pending), rec.audio_path)
-        try:
-            score = evaluator.evaluate(rec.audio_path)
-            rec.utmos = score.utmos
-            rec.nisqa_mos = score.nisqa_mos
-            rec.nisqa_noisiness = score.nisqa_noisiness
-            rec.nisqa_coloration = score.nisqa_coloration
-            rec.nisqa_discontinuity = score.nisqa_discontinuity
-            rec.nisqa_loudness = score.nisqa_loudness
-        except Exception:
-            logger.exception("MOS 평가 실패: %s", rec.audio_path)
-
-    logger.info("MOS 평가 완료")
-
 
 def _build_output_path(experiment: str, label: str, timestamp: str) -> Path:
     # 실험 타입·레이블·타임스탬프를 조합한 결과 파일 경로 생성
@@ -168,9 +144,6 @@ def export(
     if not records:
         logger.warning("내보낼 지표가 없습니다. metrics_server가 비어 있습니다.")
         return Path()
-
-    # MOS 평가 (WAV 파일 경로가 있는 레코드에 한해 일괄 실행)
-    _evaluate_mos(records)
 
     # 클라이언트 지표 리스트를 서버 기록 수에 맞춰 정렬
     # 클라이언트 지표가 적으면 None으로 패딩해 zip이 짧은 쪽에서 끊기는 것을 방지

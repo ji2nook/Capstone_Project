@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from server import api_manager
-from server.mos_evaluator import save_pcm_as_wav
+from server.audio_utils import save_pcm_as_wav
 
 _AUDIO_DIR = Path("results") / "audio"
 

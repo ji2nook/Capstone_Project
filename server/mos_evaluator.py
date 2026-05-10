@@ -4,7 +4,6 @@
 # 두 모델을 함께 사용해 레이턴시 지표만으로는 포착하지 못하는 음질 차이를 정량화함
 
 import logging
-import wave
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,26 +17,6 @@ logger = logging.getLogger(__name__)
 # ElevenLabs pcm_24000 포맷은 24kHz이므로 평가 전 리샘플링이 필요
 _UTMOS_SR = 16000
 _PCM_SR = 24000  # ElevenLabs pcm_24000
-
-
-# ========================================
-# PCM 유틸리티
-# ========================================
-
-def save_pcm_as_wav(
-    pcm_bytes: bytes,
-    output_path: str | Path,
-    sample_rate: int = _PCM_SR,
-    channels: int = 1,
-    sampwidth: int = 2,  # 16-bit
-) -> None:
-    # 표준 wave 헤더를 붙여 WAV 파일로 저장
-    # MOS 평가 모델은 WAV 입력을 요구하므로 PCM raw bytes를 변환해 보존
-    with wave.open(str(output_path), "wb") as wf:
-        wf.setnchannels(channels)
-        wf.setsampwidth(sampwidth)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm_bytes)
 
 
 # ========================================
