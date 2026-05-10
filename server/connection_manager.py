@@ -1,5 +1,6 @@
 # WebSocket 연결 관리 및 FastAPI 앱 설정
 
+import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -20,7 +21,11 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await api_manager.warmup()
-    yield
+    try:
+        yield
+    except asyncio.CancelledError:
+        # Ctrl+C 종료 시 Windows asyncio에서 발생하는 CancelledError 정상 처리
+        pass
 
 # main.py가 이 객체를 import해서 uvicorn으로 전송
 app = FastAPI(title="Capstone Pipeline Server", lifespan=lifespan)
@@ -121,6 +126,7 @@ async def websocket_endpoint(
                     experiment="sequential",
                     prompt=result.prompt,
                     llm_response=result.llm_response,
+                    audio_path=result.audio_path,
                 )
                 
                 await manager.send_bytes(websocket, result.audio_bytes)

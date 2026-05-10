@@ -17,15 +17,22 @@ logger = logging.getLogger(__name__)
 class MetricRecord:
     # 단일 파이프라인 실행 시의 기록 시각 및 성능 지표
     # logger.py에서 이 객체를 JSON/CSV로 직렬화
-    timestamp: str      # 기록 시각
-    experiment: str     # 실험 파이프라인 식별자 ("sequential" / "streaming" / "adaptive")
-    prompt: str         # 사용자 입력 프롬프트
-    llm_response: str   # LLM이 생성한 텍스트 응답
-    llm_latency: float  # LLM API 소요 시간 (ms)
-    tts_latency: float  # TTS API 소요 시간 (ms)
-    e2e_latency: float  # 서버 측 E2E Latency (ms)
-    ttft: float         # Time To First Token (ms)
-    ttfa: float         # Time To First Audio (ms)
+    timestamp: str           # 기록 시각
+    experiment: str          # 실험 파이프라인 식별자 ("sequential" / "streaming" / "adaptive")
+    prompt: str              # 사용자 입력 프롬프트
+    llm_response: str        # LLM이 생성한 텍스트 응답
+    llm_latency: float       # LLM API 소요 시간 (ms)
+    tts_latency: float       # TTS API 소요 시간 (ms)
+    e2e_latency: float       # 서버 측 E2E Latency (ms)
+    ttft: float              # Time To First Token (ms)
+    ttfa: float              # Time To First Audio (ms)
+    audio_path: str          # MOS 평가용 WAV 파일 경로
+    utmos: float | None = None               # UTMOS22: TTS 음성 자연스러움 (1~5)
+    nisqa_mos: float | None = None           # NISQA: 종합 음질 점수 (1~5)
+    nisqa_noisiness: float | None = None     # NISQA NOI: 배경 잡음·왜곡 정도 (1~5, 높을수록 깨끗)
+    nisqa_coloration: float | None = None    # NISQA COL: 주파수 특성 열화 (1~5, 높을수록 원음에 가까움)
+    nisqa_discontinuity: float | None = None # NISQA DIS: 음성 단절·드롭아웃 (1~5, 높을수록 끊김 없음)
+    nisqa_loudness: float | None = None      # NISQA LOUD: 음량 일관성 (1~5, 높을수록 일정한 음량)
 
 
 # ========================================
@@ -47,6 +54,7 @@ def record(
     experiment: str = "sequential",
     prompt: str = "",
     llm_response: str = "",
+    audio_path: str = "",
 ) -> None:
     entry = MetricRecord(
         timestamp=datetime.now(tz=timezone.utc).isoformat(),
@@ -58,6 +66,7 @@ def record(
         e2e_latency=metrics.e2e_latency,
         ttft=metrics.ttft,
         ttfa=metrics.ttfa,
+        audio_path=audio_path,
     )
 
     _records.append(entry)

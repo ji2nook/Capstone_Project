@@ -34,10 +34,12 @@ if __name__ == "__main__":
 
     logger.info("서버 시작 — ws://%s:%d/ws", host, port)
 
-    # connection_manager 모듈의 app 객체를 문자열 참조로 전달
-    uvicorn.run(
-        "server.connection_manager:app",
-        host=host,
-        port=port,
-        log_level="info",
-    )
+    try:
+        uvicorn.run(
+            "server.connection_manager:app",
+            host=host,
+            port=port,
+            log_level="info",
+        )
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("서버 종료")

@@ -6,10 +6,14 @@
 
 import logging
 import time
-
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
 from server import api_manager
+from server.mos_evaluator import save_pcm_as_wav
+
+_AUDIO_DIR = Path("results") / "audio"
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,15 @@ class PipelineResult:
     metrics: BaseMetrics # 이 실행에서 측정한 성능 지표 (실험별 서브클래스로 전달됨)
     prompt: str          # 사용자 입력 프롬프트
     llm_response: str    # LLM이 생성한 텍스트 응답
+    audio_path: str      # MOS 평가용 WAV 파일 경로
+
+
+def _save_audio(audio_bytes: bytes, experiment: str) -> str:
+    _AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    path = _AUDIO_DIR / f"{experiment}_{ts}.wav"
+    save_pcm_as_wav(audio_bytes, path)
+    return str(path)
 
 
 # ========================================
@@ -101,6 +114,10 @@ async def run_sequential(prompt: str) -> PipelineResult:
     logger.info("[Sequential] TTS 완료 — %.1fms, %d bytes", tts_latency, len(audio_bytes))
     logger.info("[Sequential] 서버 측 E2E Latency: %.1fms", e2e_latency)
 
+    # 레이턴시 측정 완료 후 WAV 저장 (측정값에 영향 없음)
+    audio_path = _save_audio(audio_bytes, "sequential")
+    logger.info("[Sequential] 오디오 저장: %s", audio_path)
+
 
     # ------------------------------
     # 성능 지표 객체 생성
@@ -126,4 +143,5 @@ async def run_sequential(prompt: str) -> PipelineResult:
         metrics=metrics,
         prompt=prompt,
         llm_response=text,
+        audio_path=audio_path,
     )
