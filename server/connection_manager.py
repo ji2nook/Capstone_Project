@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
@@ -93,14 +94,19 @@ manager = ConnectionManager()
 @app.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
-    # 실험 파라미터 선택 (ws://host/ws?experiment=sequential)
-    # 동일한 서버 바이너리로 실험 파이프라인을 전환하여 비교할 수 있도록 설계
     experiment: str = Query(
         default="sequential",
         description="실험 타입: sequential | streaming | adaptive",
     ),
+    token: str = Query(default=""),
 ) -> None:
-    
+    # 토큰 검증 — WS_TOKEN 환경변수가 설정된 경우에만 강제
+    expected_token = os.environ.get("WS_TOKEN", "")
+    if expected_token and token != expected_token:
+        await websocket.close(code=1008)  # 1008: Policy Violation
+        logger.warning("WebSocket 연결 거부: 유효하지 않은 토큰 (experiment=%s)", experiment)
+        return
+
     # 클라이언트 연결을 수락하고 선택된 파이프라인 반복 실행
     await manager.connect(websocket)
 

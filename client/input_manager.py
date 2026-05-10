@@ -54,9 +54,11 @@ class InputManager:
     ) -> None:
         resolved_host = host or os.environ.get("HOST", "localhost")
         resolved_port = port or int(os.environ.get("PORT", "8765"))
+        ws_token = os.environ.get("WS_TOKEN", "")
 
-        # experiment 값을 쿼리 스트링으로 전달해 서버가 파이프라인을 분기할 수 있도록 함
         self._ws_url = f"ws://{resolved_host}:{resolved_port}/ws?experiment={experiment}"
+        if ws_token:
+            self._ws_url += f"&token={ws_token}"
         self._experiment = experiment
         self._ws: Any = None  # run() 실행 중에만 WebSocket 인스턴스가 할당됨
 
