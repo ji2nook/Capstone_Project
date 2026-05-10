@@ -1,0 +1,15 @@
+# 클라우드 서버(Azure VM)에 설치할 의존성만 포함
+# torch / NISQA / pyaudio 등 MOS·클라이언트 패키지는 제외
+
+python-dotenv==1.2.2
+fastapi==0.135.3
+uvicorn[standard]==0.44.0
+
+# LLM (OpenRouter via OpenAI SDK)
+openai>=1.30.0
+
+# TTS (ElevenLabs)
+elevenlabs>=1.0.0
+
+# WAV 저장 (experiment_pipeline.py → mos_evaluator.save_pcm_as_wav)
+# wave 모듈은 표준 라이브러리이므로 별도 설치 불필요
