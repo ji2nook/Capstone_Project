@@ -47,8 +47,12 @@ def _collect_targets(target: Path) -> list[Path]:
     return [p for p in candidates if _needs_evaluation(p)]
 
 
+def _round(v: float | None) -> float | None:
+    return round(v, 3) if v is not None else None
+
+
 def _evaluate_file(path: Path, evaluator: MOSEvaluator) -> None:
-    """단일 JSON 파일의 records에 MOS 점수를 채워 넣고 덮어쓴다."""
+    """server JSON에 MOS 점수를 채우고, 대응하는 summary JSON도 동기화한다."""
     data = json.loads(path.read_text(encoding="utf-8"))
     records: list[dict] = data.get("results", [])
 
@@ -64,17 +68,42 @@ def _evaluate_file(path: Path, evaluator: MOSEvaluator) -> None:
         logger.info("평가 중 (%d/%d): %s", i, len(pending), audio_path)
         try:
             score = evaluator.evaluate(audio_path)
-            rec["utmos"] = round(score.utmos, 3)
-            rec["nisqa_mos"] = round(score.nisqa_mos, 3)
-            rec["nisqa_noisiness"] = round(score.nisqa_noisiness, 3)
-            rec["nisqa_coloration"] = round(score.nisqa_coloration, 3)
-            rec["nisqa_discontinuity"] = round(score.nisqa_discontinuity, 3)
-            rec["nisqa_loudness"] = round(score.nisqa_loudness, 3)
+            rec["utmos"] = _round(score.utmos)
+            rec["nisqa_mos"] = _round(score.nisqa_mos)
+            rec["nisqa_noisiness"] = _round(score.nisqa_noisiness)
+            rec["nisqa_coloration"] = _round(score.nisqa_coloration)
+            rec["nisqa_discontinuity"] = _round(score.nisqa_discontinuity)
+            rec["nisqa_loudness"] = _round(score.nisqa_loudness)
         except Exception:
             logger.exception("MOS 평가 실패: %s", audio_path)
 
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    logger.info("저장 완료: %s", path)
+    logger.info("server 저장 완료: %s", path)
+
+    # summary 파일도 동기화 — server JSON과 타임스탬프가 같은 파일을 찾아 MOS 갱신
+    summary_path = Path(str(path).replace("_server_", "_summary_"))
+    if not summary_path.exists():
+        logger.warning("summary 파일 없음 (스킵): %s", summary_path.name)
+        return
+
+    summary_data = json.loads(summary_path.read_text(encoding="utf-8"))
+    # timestamp 기준으로 server 레코드와 1:1 매핑
+    mos_by_ts = {r["timestamp"]: r for r in records}
+    for row in summary_data.get("results", []):
+        src = mos_by_ts.get(row["timestamp"])
+        if src is None:
+            continue
+        row["mos"] = {
+            "utmos": _round(src.get("utmos")),
+            "nisqa_mos": _round(src.get("nisqa_mos")),
+            "nisqa_noisiness": _round(src.get("nisqa_noisiness")),
+            "nisqa_coloration": _round(src.get("nisqa_coloration")),
+            "nisqa_discontinuity": _round(src.get("nisqa_discontinuity")),
+            "nisqa_loudness": _round(src.get("nisqa_loudness")),
+        }
+
+    summary_path.write_text(json.dumps(summary_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    logger.info("summary 저장 완료: %s", summary_path.name)
 
 
 def main() -> None:
