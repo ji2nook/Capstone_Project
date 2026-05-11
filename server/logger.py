@@ -2,12 +2,14 @@
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from server import metrics_server
 from server.metrics_server import MetricRecord
+from server.mos_evaluator import MOSEvaluator
+from server.network_probe import NetworkSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +134,7 @@ def _merge(record: MetricRecord, client: ClientMetrics | None) -> dict:
 def export(
     experiment: str = "sequential",
     client_metrics: list[ClientMetrics] | None = None,
+    network_snapshot: NetworkSnapshot | None = None,
     clear_after: bool = True,
 ) -> Path:
     #metrics_server에 누적된 기록을 JSON 파일로 내보냄
@@ -155,6 +158,23 @@ def export(
     else:
         clients = [None] * len(records)
 
+    # MOS 평가 — WAV 경로가 있는 레코드에 한해 평가 후 MetricRecord 필드에 직접 기록
+    # UTMOS / NISQA 각각 독립 실패 처리 (mos_evaluator.py 참고)
+    evaluator = MOSEvaluator()
+    for rec in records:
+        if not rec.audio_path:
+            continue
+        try:
+            mos = evaluator.evaluate(rec.audio_path)
+            rec.utmos = mos.utmos
+            rec.nisqa_mos = mos.nisqa_mos
+            rec.nisqa_noisiness = mos.nisqa_noisiness
+            rec.nisqa_coloration = mos.nisqa_coloration
+            rec.nisqa_discontinuity = mos.nisqa_discontinuity
+            rec.nisqa_loudness = mos.nisqa_loudness
+        except Exception:
+            logger.warning("MOS 평가 실패 (스킵): %s", rec.audio_path, exc_info=True)
+
     # 서버 + 클라이언트 지표를 1:1로 병합
     rows = [_merge(rec, cli) for rec, cli in zip(records, clients)]
 
@@ -166,10 +186,18 @@ def export(
     # ------------------------------
     # 전체 지표 파일 (server)
     # ------------------------------
+    network_data = asdict(network_snapshot) if network_snapshot is not None else None
+
     output_path = _build_output_path(experiment, "server", ts_str)
     output_path.write_text(
         json.dumps(
-            {"experiment": experiment, "exported_at": exported_at, "count": len(rows), "results": rows},
+            {
+                "experiment": experiment,
+                "exported_at": exported_at,
+                "network_environment": network_data,
+                "count": len(rows),
+                "results": rows,
+            },
             indent=2, ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -183,7 +211,13 @@ def export(
     summary_path = _build_output_path(experiment, "summary", ts_str)
     summary_path.write_text(
         json.dumps(
-            {"experiment": experiment, "exported_at": exported_at, "count": len(summary_rows), "results": summary_rows},
+            {
+                "experiment": experiment,
+                "exported_at": exported_at,
+                "network_environment": network_data,
+                "count": len(summary_rows),
+                "results": summary_rows,
+            },
             indent=2, ensure_ascii=False,
         ),
         encoding="utf-8",

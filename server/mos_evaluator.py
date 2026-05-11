@@ -26,13 +26,13 @@ _PCM_SR = 24000  # ElevenLabs pcm_24000
 @dataclass
 class MOSScore:
     # 단일 오디오 파일에 대한 UTMOS + NISQA 평가 결과
-    # 모든 점수 범위: 1~5 (높을수록 좋음)
-    utmos: float               # UTMOS22: TTS 자연스러움 — 사람 음성과의 유사도
-    nisqa_mos: float           # NISQA: 종합 음질
-    nisqa_noisiness: float     # NISQA NOI: 배경 잡음·왜곡 정도
-    nisqa_coloration: float    # NISQA COL: 주파수 특성 열화 (코덱 압축 등)
-    nisqa_discontinuity: float # NISQA DIS: 음성 단절·드롭아웃 — 스트리밍 실험의 핵심 지표
-    nisqa_loudness: float      # NISQA LOUD: 음량 일관성
+    # 모든 점수 범위: 1~5 (높을수록 좋음), 평가 실패 시 None
+    utmos: float | None               # UTMOS22: TTS 자연스러움 — 사람 음성과의 유사도
+    nisqa_mos: float | None           # NISQA: 종합 음질
+    nisqa_noisiness: float | None     # NISQA NOI: 배경 잡음·왜곡 정도
+    nisqa_coloration: float | None    # NISQA COL: 주파수 특성 열화 (코덱 압축 등)
+    nisqa_discontinuity: float | None # NISQA DIS: 음성 단절·드롭아웃 — 스트리밍 실험의 핵심 지표
+    nisqa_loudness: float | None      # NISQA LOUD: 음량 일관성
 
 
 # ========================================
@@ -111,15 +111,32 @@ class MOSEvaluator:
     # ----------------------------------------
 
     def evaluate(self, wav_path: str | Path) -> MOSScore:
-        # UTMOS → NISQA 순으로 평가 후 MOSScore로 묶어 반환
-        # logger.export() 호출 시 레코드별로 순차 실행됨
+        # UTMOS / NISQA를 독립적으로 평가 — 한쪽이 실패해도 나머지 결과는 보존
         wav_path = str(wav_path)
-        utmos = self._score_utmos(wav_path)
-        logger.info("UTMOS: %.3f", utmos)
-        nisqa = self._score_nisqa(wav_path)
-        logger.info(
-            "NISQA MOS=%.3f NOI=%.3f COL=%.3f DIS=%.3f LOUD=%.3f",
-            nisqa["nisqa_mos"], nisqa["nisqa_noisiness"],
-            nisqa["nisqa_coloration"], nisqa["nisqa_discontinuity"], nisqa["nisqa_loudness"],
+
+        utmos: float | None = None
+        try:
+            utmos = self._score_utmos(wav_path)
+            logger.info("UTMOS: %.3f", utmos)
+        except Exception:
+            logger.warning("UTMOS 평가 실패: %s", wav_path, exc_info=True)
+
+        nisqa: dict[str, float] | None = None
+        try:
+            nisqa = self._score_nisqa(wav_path)
+            logger.info(
+                "NISQA MOS=%.3f NOI=%.3f COL=%.3f DIS=%.3f LOUD=%.3f",
+                nisqa["nisqa_mos"], nisqa["nisqa_noisiness"],
+                nisqa["nisqa_coloration"], nisqa["nisqa_discontinuity"], nisqa["nisqa_loudness"],
+            )
+        except Exception:
+            logger.warning("NISQA 평가 실패: %s", wav_path, exc_info=True)
+
+        return MOSScore(
+            utmos=utmos,
+            nisqa_mos=nisqa["nisqa_mos"] if nisqa else None,
+            nisqa_noisiness=nisqa["nisqa_noisiness"] if nisqa else None,
+            nisqa_coloration=nisqa["nisqa_coloration"] if nisqa else None,
+            nisqa_discontinuity=nisqa["nisqa_discontinuity"] if nisqa else None,
+            nisqa_loudness=nisqa["nisqa_loudness"] if nisqa else None,
         )
-        return MOSScore(utmos=utmos, **nisqa)
