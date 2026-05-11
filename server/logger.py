@@ -8,8 +8,14 @@ from pathlib import Path
 
 from server import metrics_server
 from server.metrics_server import MetricRecord
-from server.mos_evaluator import MOSEvaluator
 from server.network_probe import NetworkSnapshot
+
+# torch/soundfile이 없는 환경(VM)에서도 서버가 기동될 수 있도록 조건부 import
+try:
+    from server.mos_evaluator import MOSEvaluator
+    _MOS_AVAILABLE = True
+except ImportError:
+    _MOS_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -158,22 +164,25 @@ def export(
     else:
         clients = [None] * len(records)
 
-    # MOS 평가 — WAV 경로가 있는 레코드에 한해 평가 후 MetricRecord 필드에 직접 기록
-    # UTMOS / NISQA 각각 독립 실패 처리 (mos_evaluator.py 참고)
-    evaluator = MOSEvaluator()
-    for rec in records:
-        if not rec.audio_path:
-            continue
-        try:
-            mos = evaluator.evaluate(rec.audio_path)
-            rec.utmos = mos.utmos
-            rec.nisqa_mos = mos.nisqa_mos
-            rec.nisqa_noisiness = mos.nisqa_noisiness
-            rec.nisqa_coloration = mos.nisqa_coloration
-            rec.nisqa_discontinuity = mos.nisqa_discontinuity
-            rec.nisqa_loudness = mos.nisqa_loudness
-        except Exception:
-            logger.warning("MOS 평가 실패 (스킵): %s", rec.audio_path, exc_info=True)
+    # MOS 평가 — torch/soundfile이 설치된 환경(로컬)에서만 실행
+    # VM에서는 _MOS_AVAILABLE=False이므로 스킵, MOS 필드는 None으로 유지
+    if _MOS_AVAILABLE:
+        evaluator = MOSEvaluator()
+        for rec in records:
+            if not rec.audio_path:
+                continue
+            try:
+                mos = evaluator.evaluate(rec.audio_path)
+                rec.utmos = mos.utmos
+                rec.nisqa_mos = mos.nisqa_mos
+                rec.nisqa_noisiness = mos.nisqa_noisiness
+                rec.nisqa_coloration = mos.nisqa_coloration
+                rec.nisqa_discontinuity = mos.nisqa_discontinuity
+                rec.nisqa_loudness = mos.nisqa_loudness
+            except Exception:
+                logger.warning("MOS 평가 실패 (스킵): %s", rec.audio_path, exc_info=True)
+    else:
+        logger.info("MOS 패키지 미설치 — MOS 평가 스킵 (tools/evaluate_mos.py로 별도 실행)")
 
     # 서버 + 클라이언트 지표를 1:1로 병합
     rows = [_merge(rec, cli) for rec, cli in zip(records, clients)]
