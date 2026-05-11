@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import platform
 import subprocess
 import time
 from dataclasses import dataclass
@@ -23,19 +24,27 @@ class NetworkSnapshot:
 
 
 def _ping_host(host: str, count: int = _PING_COUNT) -> float | None:
-    # Windows ping으로 대상 호스트까지의 평균 RTT(ms) 측정
+    """대상 호스트까지의 평균 RTT(ms) 측정 — Windows/Linux 공통."""
+    is_windows = platform.system() == "Windows"
+    cmd = ["ping", "-n" if is_windows else "-c", str(count), host]
     try:
         result = subprocess.run(
-            ["ping", "-n", str(count), host],
+            cmd,
             capture_output=True,
             text=True,
             timeout=count + 10,
         )
         for line in result.stdout.splitlines():
-            # Windows 출력: "평균 = 23ms" 또는 "Average = 23ms"
-            if "Average" in line or "평균" in line:
-                rtt_str = line.split("=")[-1].strip().replace("ms", "").strip()
-                return float(rtt_str)
+            if is_windows:
+                # Windows: "Average = 23ms" 또는 "평균 = 23ms"
+                if "Average" in line or "평균" in line:
+                    rtt_str = line.split("=")[-1].strip().replace("ms", "").strip()
+                    return float(rtt_str)
+            else:
+                # Linux: "rtt min/avg/max/mdev = 1.2/2.3/3.4/0.5 ms"
+                if line.startswith("rtt"):
+                    avg_str = line.split("=")[1].strip().split("/")[1]
+                    return float(avg_str)
     except Exception:
         logger.warning("ping 측정 실패: %s", host)
     return None
