@@ -1,6 +1,8 @@
 venv/
 .env
 Experiment1_Plan.md
+Experiment1_Implementation.md
+Experiment2_Plan.md
 __pycache__/
 *.pyc
 *.pyo

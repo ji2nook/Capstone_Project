@@ -11,6 +11,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from server import api_manager, experiment_pipeline, metrics_server
 from server import logger as result_logger
 from server.logger import ClientMetrics
+from server.network_probe import NetworkSnapshot, snapshot as network_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _net_snapshot
     await api_manager.warmup()
+    _net_snapshot = await network_snapshot()
     try:
         yield
     except asyncio.CancelledError:
@@ -85,6 +88,9 @@ class ConnectionManager:
 
 # 모듈 수준 싱글턴: main.py와 엔드포인트 핸들러가 동일 인스턴스 공유
 manager = ConnectionManager()
+
+# 서버 시작 시 한 번 수집한 네트워크 스냅샷 — 모든 export()에 공유
+_net_snapshot: NetworkSnapshot | None = None
 
 
 # ========================================
@@ -180,4 +186,5 @@ async def websocket_endpoint(
         result_logger.export(
             experiment=experiment,
             client_metrics=client_metrics_list or None,
+            network_snapshot=_net_snapshot,
         )
