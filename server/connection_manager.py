@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _net_snapshot
-    await api_manager.warmup()
+    try:
+        await api_manager.warmup()
+    except Exception:
+        logger.warning("API 워밍업 실패 — 서버는 계속 시작됩니다 (첫 요청 시 지연 발생 가능)")
     _net_snapshot = await network_snapshot()
     try:
         yield
