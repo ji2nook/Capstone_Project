@@ -2,6 +2,7 @@
 
 import os
 import logging
+from typing import AsyncGenerator
 
 from openai import AsyncOpenAI
 from elevenlabs.client import AsyncElevenLabs
@@ -85,19 +86,60 @@ async def synthesize_full_audio(text: str) -> bytes:
     return audio_bytes
 
 
-# ========================================
-# 스트리밍 처리 함수 (실험 2)
-# ========================================
-
-
-
 
 # ========================================
-# 적응형 스트리밍 처리 함수 (실험 3)
+# 스트리밍 처리 함수 (실험 2, 실험 3)
 # ========================================
 
+# LLM 스트리밍 응답 생성 함수
+# stream=True 옵션으로 토큰을 수신하는 즉시 yield한다.
+# OpenAI SDK에서 stream=True일 때 create()는 스트림 객체를 반환하는 coroutine이므로 await 필요
+async def generate_streaming_response(prompt: str) -> AsyncGenerator[str, None]:
+    #LLM 토큰 스트림을 AsyncGenerator로 yield
+    logger.debug("LLM 스트리밍 요청 시작: %s", prompt)
+
+    stream = await llm_client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        stream=True,
+    )
+
+    token_count = 0
+    total_chars = 0
+    async for chunk in stream:
+        token = chunk.choices[0].delta.content
+        if token:
+            token_count += 1
+            total_chars += len(token)
+            yield token
+
+    logger.debug("LLM 스트리밍 완료: %d 토큰, %d자", token_count, total_chars)
 
 
+# TTS 스트리밍 오디오 합성 함수
+# ElevenLabs SDK가 전달하는 raw 바이트를 수신 단위 그대로 yield한다.
+# 고정 크기 정규화 및 적응형 분할은 streaming_controller.py에서 담당한다.
+# convert()는 AsyncGenerator를 직접 반환하므로 await 없이 사용한다.
+async def synthesize_streaming_audio(text: str) -> AsyncGenerator[bytes, None]:
+    """ElevenLabs 스트리밍 TTS. 수신된 raw 바이트를 그대로 yield."""
+    logger.debug("TTS 스트리밍 요청 시작: %s", text)
+
+    audio_stream = tts_client.text_to_speech.convert(
+        voice_id=TTS_VOICE_ID,
+        text=text,
+        model_id=TTS_MODEL_ID,
+        output_format=TTS_OUTPUT_FORMAT,
+    )
+
+    chunk_count = 0
+    total_bytes = 0
+    async for raw_chunk in audio_stream:
+        if raw_chunk:
+            yield raw_chunk
+            chunk_count += 1
+            total_bytes += len(raw_chunk)
+
+    logger.debug("TTS 스트리밍 완료: %d 청크, %d bytes", chunk_count, total_bytes)
 
 
 
