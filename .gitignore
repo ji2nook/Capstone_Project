@@ -3,6 +3,7 @@ venv/
 Experiment1_Plan.md
 Experiment1_Implementation.md
 Experiment2_Plan.md
+Experiment3_Plan.md
 __pycache__/
 *.pyc
 *.pyo
