@@ -152,6 +152,8 @@ async def main() -> None:
     with AudioPlayer() as audio_player:
         try:
             async for result in input_manager.run():
+                # 매 사이클 시작 시 초기화하여 이전 사이클 starvation이 누적되지 않도록 함
+                jitter_buffer.reset()
 
                 # 실험 1: 패스스루 | 실험 2·3: jitter_buffer.feed() / drain()으로 교체
                 audio = jitter_buffer.pass_through(result.audio_bytes)
@@ -159,16 +161,20 @@ async def main() -> None:
                 # AudioPlayer.play()는 블로킹 함수이므로 스레드 풀에 위임
                 play_duration = await loop.run_in_executor(None, audio_player.play, audio)
 
-                # 실험 1: buffer_starvation, stutter_duration은 기본값 0
-                # 실험 2·3: jitter_buffer.starvation_count, audio_player 측정값 전달
-                metrics.record(result, play_duration)
+                # 실험 1: pass_through는 drain()을 호출하지 않으므로 항상 0
+                # 실험 2·3: jitter_buffer.starvation_count 실측값이 채워짐
+                buffer_starvation = jitter_buffer.starvation_count
+                # feed()로 수집한 실제 평균 청크 크기 기반 계산
+                stutter_duration = jitter_buffer.stutter_duration_ms
+
+                metrics.record(result, play_duration, buffer_starvation, stutter_duration)
 
                 # 클라이언트 지표를 서버에 역전송 → 서버 결과 파일에 통합
                 await input_manager.send_client_metrics({
                     "ttfa_client": (result.t_recv - result.t_send) * 1000,
                     "play_duration": play_duration,
-                    "buffer_starvation": 0,
-                    "stutter_duration": 0.0,
+                    "buffer_starvation": buffer_starvation,
+                    "stutter_duration": stutter_duration,
                 })
 
                 _print_result(result, play_duration)

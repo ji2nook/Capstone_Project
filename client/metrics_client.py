@@ -26,8 +26,8 @@ class MetricsClient:
         play_duration: float,
         buffer_starvation: int = 0,      # 실험 2·3: jitter_buffer가 측정한 값을 전달
         stutter_duration: float = 0.0,   # 실험 2·3: audio_player가 측정한 값을 전달
-    ) -> None:
-        
+    ) -> ClientMetrics:
+
         # 한 사이클의 지표를 계산하여 저장
         ttfa_client = (result.t_recv - result.t_send) * 1000
 
@@ -46,6 +46,7 @@ class MetricsClient:
             buffer_starvation,
             stutter_duration,
         )
+        return entry
 
     def get_records(self) -> list[ClientMetrics]:
         # 저장된 모든 지표의 복사본 반환
