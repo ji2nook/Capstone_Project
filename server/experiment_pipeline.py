@@ -4,6 +4,7 @@
 # 실험 2 : 스트리밍 처리 방식 (Streaming)
 # 실험 3 : 적응형 스트리밍 처리 방식 (Adaptive Streaming)
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -168,49 +169,84 @@ async def run_streaming(
     max_text_chars: int = streaming_controller.TEXT_CHUNK_SIZE,
 ) -> AsyncGenerator[tuple[bytes, StreamingMetrics | None], None]:
 
+    # 큐 종료를 알리는 sentinel — bytes·Queue와 타입이 달라 isinstance 없이 구별 가능
+    _DONE: object = object()
+
     t_start = time.perf_counter()
     ttft: float | None = None
     ttfa: float | None = None
     all_audio = bytearray()
     text_chunk_count = 0
     audio_chunk_count = 0
-
-    # 마지막 텍스트 청크의 TTS 시작 시점 추적 (tts_latency 근사치 산출용)
     t_last_tts_start: float = t_start
 
-    logger.info("[Streaming] 파이프라인 시작")
+    # pipeline: 텍스트 청크 순서대로 등록되는 "오디오 큐의 큐"
+    # 원소: asyncio.Queue(오디오 청크 담당) | _DONE(텍스트 스트림 종료 신호)
+    pipeline: asyncio.Queue = asyncio.Queue()
+
+    logger.info("[Streaming] 파이프라인 시작 (max_text_chars=%d)", max_text_chars)
 
     # ------------------------------
-    # LLM 스트리밍 및 텍스트 청크 분할
+    # TTS worker: 텍스트 청크 1개를 전담하는 독립 태스크
     # ------------------------------
-    # 문장 경계 우선 flush, max_text_chars 초과 시 강제 flush (하이브리드)
-    token_stream = api_manager.generate_streaming_response(prompt)
-    text_chunks = streaming_controller.llm_text_chunker(
-        token_stream,
-        max_chars=max_text_chars,
-        use_sentence_end=True,
-    )
+    # 이전 청크의 오디오가 클라이언트로 전송되는 동안 다음 청크의 TTS가 병렬로 실행됨
+    async def _tts_worker(text_chunk: str, audio_q: asyncio.Queue) -> None:
+        try:
+            raw_audio_stream = api_manager.synthesize_streaming_audio(text_chunk)
+            async for audio_chunk in streaming_controller.tts_audio_chunker(raw_audio_stream):
+                await audio_q.put(audio_chunk)
+        except Exception:
+            logger.error("[Streaming] TTS worker 오류 (%d자)", len(text_chunk), exc_info=True)
+        finally:
+            # 성공·실패 모두 sentinel을 넣어 소비자가 무한 대기하지 않도록 보장
+            await audio_q.put(_DONE)
 
-    async for text_chunk in text_chunks:
+    # ------------------------------
+    # 텍스트 프로듀서: LLM 토큰 스트림 → 텍스트 청크 → TTS 태스크 즉시 시작
+    # ------------------------------
+    async def _text_producer() -> None:
+        nonlocal ttft, text_chunk_count, t_last_tts_start
 
-        # 첫 텍스트 청크 확정 시점 = TTFT
-        if ttft is None:
-            ttft = (time.perf_counter() - t_start) * 1000
-            logger.info("[Streaming] 첫 텍스트 청크 확정 — TTFT=%.1fms, %d자", ttft, len(text_chunk))
+        token_stream = api_manager.generate_streaming_response(prompt)
+        text_chunks = streaming_controller.llm_text_chunker(
+            token_stream,
+            max_chars=max_text_chars,
+            use_sentence_end=True,
+        )
+        async for text_chunk in text_chunks:
+            if ttft is None:
+                ttft = (time.perf_counter() - t_start) * 1000
+                logger.info("[Streaming] 첫 텍스트 청크 확정 — TTFT=%.1fms, %d자", ttft, len(text_chunk))
 
-        text_chunk_count += 1
+            text_chunk_count += 1
+            t_last_tts_start = time.perf_counter()
 
-        # ------------------------------
-        # TTS 스트리밍 및 오디오 청크 분할
-        # ------------------------------
-        # synthesize_streaming_audio: ElevenLabs raw 바이트를 불규칙한 크기로 yield
-        # 무음 경계 우선 flush, max_chunk_bytes 초과 시 강제 flush (하이브리드)
-        t_last_tts_start = time.perf_counter()
-        raw_audio_stream = api_manager.synthesize_streaming_audio(text_chunk)
+            # pipeline에 audio_q를 먼저 등록해 소비자가 순서를 유지할 수 있게 함
+            # TTS 태스크는 등록 직후 즉시 백그라운드에서 시작
+            audio_q: asyncio.Queue = asyncio.Queue()
+            await pipeline.put(audio_q)
+            asyncio.create_task(_tts_worker(text_chunk, audio_q))
 
-        async for audio_chunk in streaming_controller.tts_audio_chunker(raw_audio_stream):
+        await pipeline.put(_DONE)
 
-            # 첫 오디오 청크 수신 시점 = TTFA
+    producer = asyncio.create_task(_text_producer())
+
+    # ------------------------------
+    # 소비자: pipeline에서 audio_q를 순서대로 꺼내 오디오 청크를 yield
+    # ------------------------------
+    # audio_q N을 소비하는 동안 audio_q N+1의 TTS는 이미 백그라운드에서 실행 중
+    # → TTS API 왕복 대기 시간이 이전 청크 재생 시간과 겹쳐 전체 E2E가 단축됨
+    while True:
+        item = await pipeline.get()
+        if item is _DONE:
+            break
+
+        audio_q: asyncio.Queue = item
+        while True:
+            audio_chunk = await audio_q.get()
+            if audio_chunk is _DONE:
+                break
+
             if ttfa is None:
                 ttfa = (time.perf_counter() - t_start) * 1000
                 logger.info("[Streaming] 첫 오디오 청크 수신 — TTFA=%.1fms", ttfa)
@@ -219,14 +255,15 @@ async def run_streaming(
             all_audio.extend(audio_chunk)
             yield audio_chunk, None
 
+    await producer
+
     t_end = time.perf_counter()
     e2e_latency = (t_end - t_start) * 1000
 
-    # tts_latency: 마지막 텍스트 청크의 TTS 처리 소요 시간 (근사)
-    # 여러 청크에 걸쳐 TTS가 순차 호출되므로 전체 합산이 아닌 마지막 기준으로 기록
+    # tts_latency: 마지막 TTS 시작 ~ 파이프라인 완료까지의 시간
+    # 병렬 실행으로 인해 단일 TTS 소요 시간의 근사치임
     tts_latency = (t_end - t_last_tts_start) * 1000
 
-    # 레이턴시 측정 완료 후 WAV 저장
     audio_path = _save_audio(bytes(all_audio), "streaming")
 
     logger.info(
@@ -235,10 +272,8 @@ async def run_streaming(
     )
 
     # ------------------------------
-    # 종료 신호 + 성능 지표 반환
+    # 성능 지표 객체 생성
     # ------------------------------
-    # 빈 바이트와 함께 StreamingMetrics를 yield해 호출 측이 종료를 감지하도록 함
-    # ttft / ttfa가 None이면 오디오가 전혀 생성되지 않은 경우이므로 0.0으로 기록
     metrics = StreamingMetrics(
         llm_latency=ttft if ttft is not None else 0.0,
         tts_latency=tts_latency,

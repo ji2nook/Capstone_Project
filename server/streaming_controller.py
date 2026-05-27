@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # 문장부호 뒤 공백(\s+), 스트림 끝($), 독립 개행(\n+)을 경계로 인식
 SENTENCE_END = re.compile(r'(?<=[.?!。])\s+|(?<=[.?!。])$|\n+')
 
-TEXT_CHUNK_SIZE: int = 80     # LLM 텍스트 기본 청크 크기 (문자 수)
+TEXT_CHUNK_SIZE: int = 20     # LLM 텍스트 기본 청크 크기 (문자 수)
 AUDIO_CHUNK_SIZE: int = 8192  # TTS 오디오 기본 청크 크기 (bytes)
 
 # tts_audio_chunker 전용 PCM 포맷 상수 (api_manager TTS_OUTPUT_FORMAT="pcm_24000")
