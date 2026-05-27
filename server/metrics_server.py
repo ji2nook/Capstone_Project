@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from server.experiment_pipeline import BaseMetrics
+from server.experiment_pipeline import BaseMetrics, SequentialMetrics, StreamingMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class MetricRecord:
     # 단일 파이프라인 실행 시의 기록 시각 및 성능 지표
-    # logger.py에서 이 객체를 JSON/CSV로 직렬화
+    # logger.py에서 이 객체를 JSON으로 직렬화
     timestamp: str           # 기록 시각
     experiment: str          # 실험 파이프라인 식별자 ("sequential" / "streaming" / "adaptive")
     prompt: str              # 사용자 입력 프롬프트
@@ -27,6 +27,10 @@ class MetricRecord:
     ttft: float              # Time To First Token (ms)
     ttfa: float              # Time To First Audio (ms)
     audio_path: str          # MOS 평가용 WAV 파일 경로
+    # 실험 2·3 전용 (실험 1에서는 None)
+    text_chunk_count: int | None = None      # llm_text_chunker가 생성한 텍스트 청크 수
+    audio_chunk_count: int | None = None     # tts_audio_chunker가 생성한 오디오 청크 수
+    # MOS 평가 결과 (오프라인 평가 시 채워짐)
     utmos: float | None = None               # UTMOS22: TTS 음성 자연스러움 (1~5)
     nisqa_mos: float | None = None           # NISQA: 종합 음질 점수 (1~5)
     nisqa_noisiness: float | None = None     # NISQA NOI: 배경 잡음·왜곡 정도 (1~5, 높을수록 깨끗)
@@ -56,6 +60,24 @@ def record(
     llm_response: str = "",
     audio_path: str = "",
 ) -> None:
+    # 실험 타입별로 ttft·ttfa 및 전용 필드를 isinstance로 명시적 추출
+    if isinstance(metrics, SequentialMetrics):
+        ttft = metrics.ttft
+        ttfa = metrics.ttfa
+        text_chunk_count: int | None = None
+        audio_chunk_count: int | None = None
+    elif isinstance(metrics, StreamingMetrics):
+        ttft = metrics.ttft
+        ttfa = metrics.ttfa
+        text_chunk_count = metrics.text_chunk_count
+        audio_chunk_count = metrics.audio_chunk_count
+    else:
+        # 실험 3 등 미래 실험 타입 — 공통 필드만 기록
+        ttft = 0.0
+        ttfa = 0.0
+        text_chunk_count = None
+        audio_chunk_count = None
+
     entry = MetricRecord(
         timestamp=datetime.now(tz=timezone.utc).isoformat(),
         experiment=experiment,
@@ -64,21 +86,28 @@ def record(
         llm_latency=metrics.llm_latency,
         tts_latency=metrics.tts_latency,
         e2e_latency=metrics.e2e_latency,
-        ttft=metrics.ttft,
-        ttfa=metrics.ttfa,
+        ttft=ttft,
+        ttfa=ttfa,
         audio_path=audio_path,
+        text_chunk_count=text_chunk_count,
+        audio_chunk_count=audio_chunk_count,
     )
 
     _records.append(entry)
 
+    chunk_info = (
+        f" | 텍스트 청크={text_chunk_count} 오디오 청크={audio_chunk_count}"
+        if text_chunk_count is not None else ""
+    )
     logger.info(
-        "지표 기록 [%s] LLM=%.1fms TTS=%.1fms E2E=%.1fms TTFT=%.1fms TTFA=%.1fms",
+        "지표 기록 [%s] LLM=%.1fms TTS=%.1fms E2E=%.1fms TTFT=%.1fms TTFA=%.1fms%s",
         experiment,
         entry.llm_latency,
         entry.tts_latency,
         entry.e2e_latency,
         entry.ttft,
         entry.ttfa,
+        chunk_info,
     )
 
 

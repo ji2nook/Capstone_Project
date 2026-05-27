@@ -81,6 +81,18 @@ def _build_key_metrics(row: dict) -> dict:
     }
 
 
+def _build_streaming_info(row: dict) -> dict | None:
+    # 실험 2·3 전용 청크 정보 섹션 — 실험 1에서는 None 반환
+    text_chunk_count = row.get("text_chunk_count")
+    audio_chunk_count = row.get("audio_chunk_count")
+    if text_chunk_count is None and audio_chunk_count is None:
+        return None
+    return {
+        "text_chunk_count": text_chunk_count,
+        "audio_chunk_count": audio_chunk_count,
+    }
+
+
 def _to_summary_row(row: dict) -> dict:
     # 전체 지표 dict에서 핵심 필드만 추출해 요약 레코드 생성
     return {
@@ -89,6 +101,7 @@ def _to_summary_row(row: dict) -> dict:
         "prompt": row["prompt"],
         "llm_response": row["llm_response"],
         "key_metrics": _build_key_metrics(row),
+        "streaming_info": _build_streaming_info(row),
         "mos": {
             "utmos": round(row["utmos"], 3) if row["utmos"] is not None else None,
             "nisqa_mos": round(row["nisqa_mos"], 3) if row["nisqa_mos"] is not None else None,
@@ -124,6 +137,9 @@ def _merge(record: MetricRecord, client: ClientMetrics | None) -> dict:
         "buffer_starvation": buffer_starvation,
         "stutter_duration": stutter_duration,
         "audio_path": record.audio_path,
+        # 실험 2·3 전용 — 실험 1에서는 None
+        "text_chunk_count": record.text_chunk_count,
+        "audio_chunk_count": record.audio_chunk_count,
         "utmos": round(record.utmos, 3) if record.utmos is not None else None,
         "nisqa_mos": round(record.nisqa_mos, 3) if record.nisqa_mos is not None else None,
         "nisqa_noisiness": round(record.nisqa_noisiness, 3) if record.nisqa_noisiness is not None else None,
