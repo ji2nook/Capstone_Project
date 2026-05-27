@@ -15,7 +15,14 @@ from rich.prompt import IntPrompt
 from rich.table import Table
 
 from client.audio_player import AudioPlayer
-from client.input_manager import InputManager, SessionResult
+from client.input_manager import (
+    ExperimentSwitchRequested,
+    InputManager,
+    SessionResult,
+    StreamingCycleChunk,
+    StreamingCycleEnd,
+    StreamingCycleStart,
+)
 from client.jitter_buffer import JitterBuffer
 from client.metrics_client import MetricsClient
 from server.logger import ClientMetrics
@@ -47,8 +54,8 @@ _EXPERIMENT_OPTIONS: list[tuple[str, str]] = [
     ("adaptive",   "적응형 파이프라인   (실험 3)"),
 ]
 
-# 현재 구현된 실험만 포함 — 실험 2·3 완성 시 추가
-_IMPLEMENTED: frozenset[str] = frozenset({"sequential"})
+# 현재 구현된 실험만 포함 — 실험 3 완성 시 추가
+_IMPLEMENTED: frozenset[str] = frozenset({"sequential", "streaming"})
 
 _EXPERIMENT_PREFIX: dict[str, str] = {
     "sequential": "exp1",
@@ -88,8 +95,14 @@ def _select_experiment() -> str:
 # 결과 출력
 # ========================================
 
-def _print_result(result: SessionResult, play_duration: float) -> None:
+def _print_result(
+    result: SessionResult,
+    play_duration: float,
+    total_bytes: int | None = None,
+    chunk_count: int | None = None,
+) -> None:
     # 한 사이클 완료 후 지표를 테이블로 출력
+    # total_bytes / chunk_count 는 스트리밍 실험에서만 전달됨
     ttfa_ms = (result.t_recv - result.t_send) * 1000
 
     table = Table(box=box.ROUNDED, show_header=False, padding=(0, 2))
@@ -97,7 +110,13 @@ def _print_result(result: SessionResult, play_duration: float) -> None:
     table.add_column(justify="right")
     table.add_row("TTFA (클라이언트)", f"[cyan]{ttfa_ms:.0f} ms[/cyan]")
     table.add_row("재생 시간",         f"[cyan]{play_duration:.0f} ms[/cyan]")
-    table.add_row("오디오 크기",        f"[cyan]{len(result.audio_bytes):,} bytes[/cyan]")
+
+    if total_bytes is not None:
+        table.add_row("오디오 크기",    f"[cyan]{total_bytes:,} bytes[/cyan]")
+        if chunk_count is not None:
+            table.add_row("청크 수",    f"[cyan]{chunk_count:,}[/cyan]")
+    else:
+        table.add_row("오디오 크기",    f"[cyan]{len(result.audio_bytes):,} bytes[/cyan]")
 
     console.print(table)
     console.print()
@@ -142,46 +161,131 @@ def _save_client_metrics(metrics: MetricsClient, experiment: str) -> None:
 # ========================================
 
 async def main() -> None:
-    experiment = _select_experiment()
-
-    input_manager = InputManager(experiment=experiment)
-    metrics = MetricsClient()
-    jitter_buffer = JitterBuffer()
     loop = asyncio.get_running_loop()
 
-    with AudioPlayer() as audio_player:
-        try:
-            async for result in input_manager.run():
-                # 매 사이클 시작 시 초기화하여 이전 사이클 starvation이 누적되지 않도록 함
-                jitter_buffer.reset()
+    # /switch 입력 시 이 루프 처음으로 돌아와 파이프라인을 재선택
+    while True:
+        experiment = _select_experiment()
 
-                # 실험 1: 패스스루 | 실험 2·3: jitter_buffer.feed() / drain()으로 교체
-                audio = jitter_buffer.pass_through(result.audio_bytes)
+        input_manager = InputManager(experiment=experiment)
+        metrics = MetricsClient()
+        jitter_buffer = JitterBuffer()
+        should_switch = False
 
-                # AudioPlayer.play()는 블로킹 함수이므로 스레드 풀에 위임
-                play_duration = await loop.run_in_executor(None, audio_player.play, audio)
+        with AudioPlayer() as audio_player:
+            try:
+                # ----------------------------------------
+                # 실험 1: 순차적 파이프라인
+                # ----------------------------------------
+                if experiment == "sequential":
+                    async for result in input_manager.run():
+                        # 매 사이클 시작 시 초기화하여 이전 사이클 starvation이 누적되지 않도록 함
+                        jitter_buffer.reset()
 
-                # 실험 1: pass_through는 drain()을 호출하지 않으므로 항상 0
-                # 실험 2·3: jitter_buffer.starvation_count 실측값이 채워짐
-                buffer_starvation = jitter_buffer.starvation_count
-                # feed()로 수집한 실제 평균 청크 크기 기반 계산
-                stutter_duration = jitter_buffer.stutter_duration_ms
+                        # 실험 1: 패스스루 (버퍼링 없이 전체 오디오를 그대로 통과)
+                        audio = jitter_buffer.pass_through(result.audio_bytes)
 
-                metrics.record(result, play_duration, buffer_starvation, stutter_duration)
+                        # AudioPlayer.play()는 블로킹 함수이므로 스레드 풀에 위임
+                        play_duration = await loop.run_in_executor(None, audio_player.play, audio)
 
-                # 클라이언트 지표를 서버에 역전송 → 서버 결과 파일에 통합
-                await input_manager.send_client_metrics({
-                    "ttfa_client": (result.t_recv - result.t_send) * 1000,
-                    "play_duration": play_duration,
-                    "buffer_starvation": buffer_starvation,
-                    "stutter_duration": stutter_duration,
-                })
+                        # 실험 1: pass_through는 drain()을 호출하지 않으므로 항상 0
+                        buffer_starvation = jitter_buffer.starvation_count
+                        stutter_duration = jitter_buffer.stutter_duration_ms
 
-                _print_result(result, play_duration)
+                        metrics.record(result, play_duration, buffer_starvation, stutter_duration)
 
-        finally:
-            # 정상 종료 / 예외 / Ctrl+C 어떤 경우든 지표를 저장
-            _save_client_metrics(metrics, experiment=experiment)
+                        # 클라이언트 지표를 서버에 역전송 → 서버 결과 파일에 통합
+                        await input_manager.send_client_metrics({
+                            "ttfa_client": (result.t_recv - result.t_send) * 1000,
+                            "play_duration": play_duration,
+                            "buffer_starvation": buffer_starvation,
+                            "stutter_duration": stutter_duration,
+                        })
+
+                        _print_result(result, play_duration)
+
+                # ----------------------------------------
+                # 실험 2: 스트리밍 파이프라인
+                # ----------------------------------------
+                elif experiment == "streaming":
+                    # 사이클 간 공유 상태 — 각 사이클 시작 시 StreamingCycleStart에서 갱신됨
+                    current_prompt = ""
+                    current_t_send = 0.0
+                    current_t_first_recv = 0.0
+                    total_bytes = 0
+                    chunk_count = 0
+
+                    async for event in input_manager.run_streaming():
+                        if isinstance(event, StreamingCycleStart):
+                            # 새 사이클 시작: 버퍼 초기화 및 오디오 스트림 오픈
+                            jitter_buffer.reset()
+                            audio_player.open_stream()
+                            current_prompt = event.prompt
+                            current_t_send = event.t_send
+                            current_t_first_recv = event.t_send  # 첫 청크 수신 전 기본값
+                            total_bytes = 0
+                            chunk_count = 0
+
+                        elif isinstance(event, StreamingCycleChunk):
+                            # 청크 수신: JitterBuffer에 공급 → 즉시 소비 → PyAudio에 write
+                            # t_first_recv 는 사이클 내 첫 청크 수신 시각으로 모든 청크에 동일
+                            current_t_first_recv = event.t_first_recv
+                            total_bytes += len(event.data)
+                            chunk_count += 1
+
+                            jitter_buffer.feed(event.data)
+                            drained = jitter_buffer.drain()
+                            if drained:
+                                # feed_chunk()는 PyAudio stream.write() — 블로킹이므로 스레드 풀에 위임
+                                await loop.run_in_executor(None, audio_player.feed_chunk, drained)
+
+                        elif isinstance(event, StreamingCycleEnd):
+                            # 사이클 종료: 잔여 버퍼 소진 후 스트림 닫기 및 지표 기록
+                            # feed/drain 이 1:1로 실행되므로 일반적으로 잔여 청크는 없지만 방어적으로 처리
+                            while (remaining := jitter_buffer.drain()) is not None:
+                                await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
+
+                            play_duration = audio_player.close_stream()
+
+                            # 스트리밍의 경우 audio_bytes는 청크 단위로 재생됐으므로 b""로 표기
+                            # t_recv = 첫 청크 수신 시각 → TTFA 계산에 사용
+                            result = SessionResult(
+                                prompt=current_prompt,
+                                audio_bytes=b"",
+                                t_send=current_t_send,
+                                t_recv=current_t_first_recv,
+                            )
+
+                            buffer_starvation = jitter_buffer.starvation_count
+                            stutter_duration = jitter_buffer.stutter_duration_ms
+
+                            metrics.record(result, play_duration, buffer_starvation, stutter_duration)
+
+                            await input_manager.send_client_metrics({
+                                "ttfa_client": (result.t_recv - result.t_send) * 1000,
+                                "play_duration": play_duration,
+                                "buffer_starvation": buffer_starvation,
+                                "stutter_duration": stutter_duration,
+                            })
+
+                            _print_result(
+                                result,
+                                play_duration,
+                                total_bytes=total_bytes,
+                                chunk_count=chunk_count,
+                            )
+
+            except ExperimentSwitchRequested:
+                # /switch 입력: 지표 저장 후 파이프라인 선택 메뉴로 복귀
+                should_switch = True
+                console.print("[yellow]파이프라인 전환 — 실험을 다시 선택해주세요.[/yellow]\n")
+
+            finally:
+                # 정상 종료 / 전환 / 예외 / Ctrl+C 어떤 경우든 지표를 저장
+                _save_client_metrics(metrics, experiment=experiment)
+
+        if not should_switch:
+            break
 
 
 if __name__ == "__main__":

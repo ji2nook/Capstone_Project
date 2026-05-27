@@ -180,14 +180,13 @@ async def websocket_endpoint(
                 logger.info("[streaming] 오디오 청크 %d개 전송 완료", audio_chunk_count)
 
                 # 성능 지표 기록
-                # audio_path / llm_response는 run_streaming() 내부에서만 처리되어 현재 노출되지 않음
                 if streaming_metrics is not None:
                     metrics_server.record(
                         streaming_metrics,
                         experiment="streaming",
                         prompt=prompt,
-                        llm_response="",
-                        audio_path="",
+                        llm_response=streaming_metrics.llm_response,
+                        audio_path=streaming_metrics.audio_path,
                     )
 
                 # 오디오 전송 후 클라이언트가 역전송한 지표 JSON을 수신

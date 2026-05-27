@@ -250,7 +250,7 @@ def export(
     logger.info("요약 결과 저장 완료: %s (%d건)", summary_path, len(summary_rows))
 
     if clear_after:
-        # 이미 파일로 내보냈으므로 메모리 누적 기록을 비움
-        metrics_server.clear()
+        # 스냅샷에 포함된 레코드 수만큼만 제거 — export() 실행 중 추가된 다음 실험 레코드 보존
+        metrics_server.clear_first(len(records))
 
     return output_path

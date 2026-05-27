@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.prompt import Prompt
@@ -22,7 +23,18 @@ console = Console()
 # 종료 키워드
 _EXIT_COMMANDS: frozenset[str] = frozenset({"q", "quit", "exit"})
 
-__all__ = ["InputManager", "SessionResult"]
+# 실험 전환 키워드 — Prompt 입력 창에서 입력하면 파이프라인 재선택 메뉴로 복귀
+_SWITCH_COMMANDS: frozenset[str] = frozenset({"/switch", "switch"})
+
+__all__ = [
+    "InputManager",
+    "SessionResult",
+    "StreamingCycleStart",
+    "StreamingCycleChunk",
+    "StreamingCycleEnd",
+    "StreamingEvent",
+    "ExperimentSwitchRequested",
+]
 
 
 # ========================================
@@ -37,6 +49,42 @@ class SessionResult:
     audio_bytes: bytes # 서버로부터 수신한 raw PCM 24000Hz 오디오 (WAV 헤더 없음)
     t_send: float      # 프롬프트 전송 순간의 perf_counter 값 (E2E 시작점)
     t_recv: float      # 오디오 수신 순간의 perf_counter 값 (클라이언트 기준 TTFA)
+
+
+# ========================================
+# 스트리밍 사이클 이벤트 (실험 2)
+# ========================================
+
+@dataclass
+class StreamingCycleStart:
+    # 스트리밍 사이클 시작 — 프롬프트 전송 직후 yield
+    prompt: str
+    t_send: float
+
+
+@dataclass
+class StreamingCycleChunk:
+    # 수신한 오디오 청크 — 이 사이클의 모든 청크에 동일한 t_first_recv 값 포함
+    data: bytes
+    t_first_recv: float
+
+
+@dataclass
+class StreamingCycleEnd:
+    # 스트리밍 사이클 종료 — 서버 종료 신호(b"") 수신 후 yield
+    t_send: float
+    t_first_recv: float  # ttfa_client = (t_first_recv - t_send) * 1000
+
+
+StreamingEvent = StreamingCycleStart | StreamingCycleChunk | StreamingCycleEnd
+
+
+# ========================================
+# 예외
+# ========================================
+
+class ExperimentSwitchRequested(Exception):
+    """사용자가 /switch를 입력해 파이프라인 전환을 요청함"""
 
 
 # ========================================
@@ -66,7 +114,11 @@ class InputManager:
         # 재생 완료 후 클라이언트 지표를 JSON으로 서버에 역전송
         if self._ws is None:
             return
-        await self._ws.send(json.dumps(payload, ensure_ascii=False))
+        try:
+            await self._ws.send(json.dumps(payload, ensure_ascii=False))
+        except ConnectionClosed:
+            # 서버가 이미 연결을 끊은 경우 — 지표 역전송을 건너뜀
+            logger.warning("클라이언트 지표 역전송 실패 — 서버 연결이 이미 닫혔습니다")
 
     @staticmethod
     async def _read_line() -> str:
@@ -83,7 +135,7 @@ class InputManager:
         async with websockets.connect(self._ws_url, max_size=None) as ws:
             self._ws = ws
             console.print(f"[green]✓[/green] 서버 연결 성공  [dim]({self._ws_url})[/dim]")
-            console.print("[dim]종료: q / quit / exit 또는 Ctrl+C[/dim]\n")
+            console.print("[dim]종료: q / quit / exit  또는 Ctrl+C[/dim]  |  전환: /switch\n")
 
             while True:
                 # -------------------------------
@@ -98,6 +150,10 @@ class InputManager:
                 if not text or text.lower() in _EXIT_COMMANDS:
                     logger.info("[%s] 종료 명령 — 세션 종료", self._experiment)
                     break
+
+                if text.lower() in _SWITCH_COMMANDS:
+                    logger.info("[%s] 파이프라인 전환 요청", self._experiment)
+                    raise ExperimentSwitchRequested()
 
                 # -------------------------------
                 # 서버 전송
@@ -134,3 +190,83 @@ class InputManager:
                     # 오디오 대신 텍스트 오류 메시지를 수신한 경우
                     console.print(f"[red]오류 응답: {data}[/red]")
                     logger.warning("[%s] 텍스트 응답 수신 (파이프라인 오류): %s", self._experiment, data)
+
+    async def run_streaming(self) -> AsyncIterator[StreamingEvent]:
+        # 스트리밍 실험용 비동기 제너레이터
+        # 사이클마다 StreamingCycleStart → N×StreamingCycleChunk → StreamingCycleEnd 순서로 yield
+        logger.info("[streaming] 서버 연결: %s", self._ws_url)
+
+        async with websockets.connect(self._ws_url, max_size=None) as ws:
+            self._ws = ws
+            console.print(f"[green]✓[/green] 서버 연결 성공  [dim]({self._ws_url})[/dim]")
+            console.print("[dim]종료: q / quit / exit 또는 Ctrl+C[/dim]  |  전환: /switch\n")
+
+            while True:
+                try:
+                    text = await self._read_line()
+                except EOFError:
+                    logger.info("[streaming] stdin 닫힘 — 세션 종료")
+                    break
+
+                if not text or text.lower() in _EXIT_COMMANDS:
+                    logger.info("[streaming] 종료 명령 — 세션 종료")
+                    break
+
+                if text.lower() in _SWITCH_COMMANDS:
+                    logger.info("[streaming] 파이프라인 전환 요청")
+                    raise ExperimentSwitchRequested()
+
+                t_send = time.perf_counter()
+                try:
+                    await ws.send(text)
+                except ConnectionClosed as exc:
+                    logger.warning("[streaming] 프롬프트 전송 실패 — 서버 연결 끊김: %s", exc)
+                    break
+                logger.info("[streaming] 프롬프트 전송 (%d자)", len(text))
+
+                # 사이클 시작 신호: main.py가 jitter_buffer.reset() / audio_player.open_stream() 호출
+                yield StreamingCycleStart(prompt=text, t_send=t_send)
+
+                t_first_recv: float | None = None
+                chunk_count = 0
+                _conn_alive = True
+
+                while True:
+                    try:
+                        data = await ws.recv()
+                    except ConnectionClosed as exc:
+                        # 서버 파이프라인 오류(1011) 또는 예기치 않은 종료
+                        logger.warning("[streaming] 서버 연결 끊김 — %s", exc)
+                        console.print(f"[red]서버 연결이 끊겼습니다: {exc}[/red]")
+                        _conn_alive = False
+                        break
+
+                    if not isinstance(data, bytes):
+                        console.print(f"[red]오류 응답: {data}[/red]")
+                        logger.warning("[streaming] 텍스트 응답 수신 (파이프라인 오류): %s", data)
+                        break
+
+                    if len(data) == 0:
+                        # server의 send_end_signal()이 보낸 종료 프레임
+                        logger.info("[streaming] 종료 신호 수신 — %d개 청크", chunk_count)
+                        break
+
+                    if t_first_recv is None:
+                        t_first_recv = time.perf_counter()
+                        logger.info(
+                            "[streaming] 첫 청크 수신 — TTFA: %.1fms | %d bytes",
+                            (t_first_recv - t_send) * 1000,
+                            len(data),
+                        )
+
+                    chunk_count += 1
+                    yield StreamingCycleChunk(data=data, t_first_recv=t_first_recv)
+
+                # 사이클 종료 신호: main.py가 close_stream() / 지표 기록 / 역전송 수행
+                yield StreamingCycleEnd(
+                    t_send=t_send,
+                    t_first_recv=t_first_recv if t_first_recv is not None else t_send,
+                )
+
+                if not _conn_alive:
+                    break  # 외부 프롬프트 루프도 종료

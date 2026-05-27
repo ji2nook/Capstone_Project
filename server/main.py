@@ -40,6 +40,9 @@ if __name__ == "__main__":
             host=host,
             port=port,
             log_level="info",
+            # ws_ping_interval=None: 오디오 청크 전송 중 keepalive ping/pong이
+            # 동시에 소켓에 쓰이면 websockets legacy drain waiter 충돌(AssertionError)이 발생함
+            ws_ping_interval=None,
         )
     except (KeyboardInterrupt, SystemExit):
         logger.info("서버 종료")

@@ -120,3 +120,10 @@ def get_records() -> list[MetricRecord]:
 def clear() -> None:
     _records.clear()
     logger.debug("성능 지표 초기화 완료")
+
+
+# 앞에서 n개만 제거 — export() 완료 후 스냅샷에 포함된 레코드만 삭제할 때 사용
+# clear()를 쓰면 export() 실행 중에 추가된 다음 실험의 레코드까지 삭제되는 문제를 방지
+def clear_first(n: int) -> None:
+    del _records[:n]
+    logger.debug("성능 지표 앞 %d건 제거 완료 (잔여 %d건)", n, len(_records))

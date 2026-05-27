@@ -48,6 +48,8 @@ class StreamingMetrics(BaseMetrics):
     ttfa: float               # 파이프라인 시작 ~ 첫 오디오 청크 수신 시점 (ms)
     text_chunk_count: int     # llm_text_chunker가 생성한 텍스트 청크 수
     audio_chunk_count: int    # tts_audio_chunker가 생성한 오디오 청크 수
+    llm_response: str = ""    # LLM이 생성한 전체 텍스트 (텍스트 청크 누적)
+    audio_path: str = ""      # MOS 평가용 WAV 파일 경로
 
 
 # ========================================
@@ -179,6 +181,7 @@ async def run_streaming(
     text_chunk_count = 0
     audio_chunk_count = 0
     t_last_tts_start: float = t_start
+    full_llm_text: str = ""
 
     # pipeline: 텍스트 청크 순서대로 등록되는 "오디오 큐의 큐"
     # 원소: asyncio.Queue(오디오 청크 담당) | _DONE(텍스트 스트림 종료 신호)
@@ -205,7 +208,7 @@ async def run_streaming(
     # 텍스트 프로듀서: LLM 토큰 스트림 → 텍스트 청크 → TTS 태스크 즉시 시작
     # ------------------------------
     async def _text_producer() -> None:
-        nonlocal ttft, text_chunk_count, t_last_tts_start
+        nonlocal ttft, text_chunk_count, t_last_tts_start, full_llm_text
 
         token_stream = api_manager.generate_streaming_response(prompt)
         text_chunks = streaming_controller.llm_text_chunker(
@@ -218,6 +221,7 @@ async def run_streaming(
                 ttft = (time.perf_counter() - t_start) * 1000
                 logger.info("[Streaming] 첫 텍스트 청크 확정 — TTFT=%.1fms, %d자", ttft, len(text_chunk))
 
+            full_llm_text += text_chunk
             text_chunk_count += 1
             t_last_tts_start = time.perf_counter()
 
@@ -282,5 +286,7 @@ async def run_streaming(
         ttfa=ttfa if ttfa is not None else 0.0,
         text_chunk_count=text_chunk_count,
         audio_chunk_count=audio_chunk_count,
+        llm_response=full_llm_text,
+        audio_path=audio_path,
     )
     yield b"", metrics
