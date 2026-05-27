@@ -73,17 +73,21 @@ class ConnectionManager:
 
     # ------------------------------
     # 실험 2, 3 전용 전송 메서드
-    # 현재 미구현
-    # sent_chunk()를 반복 호출하는 식으로 구현
     # ------------------------------
+
     async def send_chunk(self, websocket: WebSocket, chunk: bytes) -> None:
-        
-        # 오디오 청크를 스트리밍 방식으로 전송
-        # 실험 2에서 LLM 토큰 스트림 -> TTS 청크 파이프라인 구현 완료하면 오디오 청크를 클라이언트에 순차 전달
-        raise NotImplementedError("실험 2, 3에서 구현 예정")
+        # 오디오 청크 1개를 WebSocket 바이너리 프레임으로 전송
+        # run_streaming()이 yield하는 각 audio_chunk에 대해 반복 호출됨
+        await websocket.send_bytes(chunk)
+        logger.debug("오디오 청크 전송: %d bytes", len(chunk))
+
+    async def send_end_signal(self, websocket: WebSocket) -> None:
+        # 스트리밍 종료를 클라이언트에 알리는 빈 바이트 프레임 전송
+        # 클라이언트는 len(data) == 0 조건으로 종료를 감지
+        await websocket.send_bytes(b"")
+        logger.info("스트리밍 종료 신호 전송 완료")
 
     async def broadcast_bytes(self, data: bytes) -> None:
-        
         # 모든 활성 클라이언트에 동일 데이터를 동시에 전송
         # 실험 3에서 여러 개의 클라이언트 시나리오가 필요할 경우에 사용
         raise NotImplementedError("실험 3에서 구현 예정")
@@ -156,11 +160,44 @@ async def websocket_endpoint(
                     logger.warning("[sequential] 클라이언트 지표 수신 실패 — null로 기록됩니다")
 
             # ------------------------------
-            # 실험 2: 스트리밍 파이프라인 (미구현)
+            # 실험 2: 스트리밍 파이프라인
             # LLM 토큰 스트림을 실시간으로 TTS에 넘기고 청크 단위로 전송
             # ------------------------------
             elif experiment == "streaming":
-                await websocket.send_text("streaming 파이프라인은 실험 2에서 구현 예정")
+                streaming_metrics = None
+                audio_chunk_count = 0
+
+                async for audio_chunk, metrics in experiment_pipeline.run_streaming(prompt):
+                    if metrics is not None:
+                        # 종료 신호: run_streaming()의 마지막 yield (b"", StreamingMetrics)
+                        streaming_metrics = metrics
+                    elif audio_chunk:
+                        await manager.send_chunk(websocket, audio_chunk)
+                        audio_chunk_count += 1
+
+                # 클라이언트에 스트리밍 종료 알림
+                await manager.send_end_signal(websocket)
+                logger.info("[streaming] 오디오 청크 %d개 전송 완료", audio_chunk_count)
+
+                # 성능 지표 기록
+                # audio_path / llm_response는 run_streaming() 내부에서만 처리되어 현재 노출되지 않음
+                if streaming_metrics is not None:
+                    metrics_server.record(
+                        streaming_metrics,
+                        experiment="streaming",
+                        prompt=prompt,
+                        llm_response="",
+                        audio_path="",
+                    )
+
+                # 오디오 전송 후 클라이언트가 역전송한 지표 JSON을 수신
+                try:
+                    raw = await websocket.receive_text()
+                    data = json.loads(raw)
+                    client_metrics_list.append(ClientMetrics(**data))
+                    logger.info("[streaming] 클라이언트 지표 수신 완료")
+                except Exception:
+                    logger.warning("[streaming] 클라이언트 지표 수신 실패 — null로 기록됩니다")
 
             # ------------------------------
             # 실험 3: 적응형 스트리밍 파이프라인 (미구현)
@@ -185,8 +222,10 @@ async def websocket_endpoint(
         # 어떤 형태의 종료든 반드시 활성화 집합에서 제거 (메모리 누수 방지)
         manager.disconnect(websocket)
 
-        # 서버 지표와 클라이언트 지표를 병합해 파일로 내보냄
-        result_logger.export(
+        # export()는 MOS 평가(torch 추론)를 포함하는 동기 함수이므로
+        # 이벤트 루프 블로킹을 막기 위해 스레드 풀에서 실행
+        await asyncio.to_thread(
+            result_logger.export,
             experiment=experiment,
             client_metrics=client_metrics_list or None,
             network_snapshot=_net_snapshot,
