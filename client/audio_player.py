@@ -25,6 +25,10 @@ class AudioPlayer:
     
     def __init__(self) -> None:
         self._pa = pyaudio.PyAudio()
+        # 스트리밍 재생 상태 (open_stream / feed_chunk / close_stream 주기 동안 유지)
+        self._stream: pyaudio.Stream | None = None
+        self._play_start: float = 0.0
+        self._total_frames: int = 0
 
     def play(self, audio_bytes: bytes) -> float:
         # 전체 오디오를 재생하고 재생 시간(ms)을 반환
@@ -53,11 +57,41 @@ class AudioPlayer:
         return play_duration
     
 
-    # --- 실험 2·3 추가 예정 ---
-    # 스트림을 열어두고 청크가 들어올 때마다 feed_chunk()로 점진적 재생
-    # def open_stream(self) -> None: ...
-    # def feed_chunk(self, chunk: bytes) -> None: ...
-    # def close_stream(self) -> float: ...  # 재생 완료 후 play_duration 반환
+    # ----------------------------------------
+    # 스트리밍 재생 (실험 2·3)
+    # ----------------------------------------
+
+    def open_stream(self) -> None:
+        # 스트리밍 재생용 PyAudio 스트림을 열고 내부 카운터를 초기화
+        self._stream = self._pa.open(
+            format=pyaudio.paInt16,
+            channels=_CHANNELS,
+            rate=_SAMPLE_RATE,
+            output=True,
+            frames_per_buffer=_CHUNK_SIZE,
+        )
+        self._play_start = time.perf_counter()
+        self._total_frames = 0
+        logger.info("스트리밍 스트림 오픈")
+
+    def feed_chunk(self, chunk: bytes) -> None:
+        # 오디오 청크를 열린 스트림에 write하고 누적 프레임 수를 갱신
+        if self._stream is None:
+            logger.warning("feed_chunk 호출: 스트림이 열려 있지 않음")
+            return
+        self._stream.write(chunk)
+        # 16-bit PCM = 2 bytes per sample, 채널 1개
+        self._total_frames += len(chunk) // 2
+
+    def close_stream(self) -> float:
+        # 스트림을 종료하고 총 재생 시간(ms)을 반환
+        if self._stream is not None:
+            self._stream.stop_stream()
+            self._stream.close()
+            self._stream = None
+        play_duration = (self._total_frames / _SAMPLE_RATE) * 1000
+        logger.info("스트리밍 스트림 종료 — 재생 시간: %.1fms", play_duration)
+        return play_duration
 
     def close(self) -> None:
         # PyAudio 인스턴스 해체
