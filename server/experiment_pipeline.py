@@ -9,8 +9,9 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import AsyncGenerator
 
-from server import api_manager
+from server import api_manager, streaming_controller
 from server.audio_utils import save_pcm_as_wav
 
 _AUDIO_DIR = Path("results") / "audio"
@@ -37,6 +38,15 @@ class SequentialMetrics(BaseMetrics):
     # 실험 1 파이프라인 성능 지표
     ttft: float   # 파이프라인 시작 ~ 첫 토큰 생성 완료 (실험 1: = llm_latency)
     ttfa: float   # 파이프라인 시작 ~ 첫 음성 생성 완료 (실험 1: = e2e_latency)
+
+
+@dataclass
+class StreamingMetrics(BaseMetrics):
+    # 실험 2 파이프라인 성능 지표
+    ttft: float               # 파이프라인 시작 ~ 첫 텍스트 청크 확정 시점 (ms)
+    ttfa: float               # 파이프라인 시작 ~ 첫 오디오 청크 수신 시점 (ms)
+    text_chunk_count: int     # llm_text_chunker가 생성한 텍스트 청크 수
+    audio_chunk_count: int    # tts_audio_chunker가 생성한 오디오 청크 수
 
 
 # ========================================
@@ -145,3 +155,97 @@ async def run_sequential(prompt: str) -> PipelineResult:
         llm_response=text,
         audio_path=audio_path,
     )
+
+
+# ========================================
+# 실험 2: 스트리밍 처리 파이프라인
+# ========================================
+
+# LLM 토큰 스트림을 고정된 청크 단위 / 문장 경계 감지하여 분할 후 전송 및 TTS 청크 합성 후 오디오 청크 스트리밍
+
+async def run_streaming(
+    prompt: str,
+    max_text_chars: int = streaming_controller.TEXT_CHUNK_SIZE,
+) -> AsyncGenerator[tuple[bytes, StreamingMetrics | None], None]:
+
+    t_start = time.perf_counter()
+    ttft: float | None = None
+    ttfa: float | None = None
+    all_audio = bytearray()
+    text_chunk_count = 0
+    audio_chunk_count = 0
+
+    # 마지막 텍스트 청크의 TTS 시작 시점 추적 (tts_latency 근사치 산출용)
+    t_last_tts_start: float = t_start
+
+    logger.info("[Streaming] 파이프라인 시작")
+
+    # ------------------------------
+    # LLM 스트리밍 및 텍스트 청크 분할
+    # ------------------------------
+    # 문장 경계 우선 flush, max_text_chars 초과 시 강제 flush (하이브리드)
+    token_stream = api_manager.generate_streaming_response(prompt)
+    text_chunks = streaming_controller.llm_text_chunker(
+        token_stream,
+        max_chars=max_text_chars,
+        use_sentence_end=True,
+    )
+
+    async for text_chunk in text_chunks:
+
+        # 첫 텍스트 청크 확정 시점 = TTFT
+        if ttft is None:
+            ttft = (time.perf_counter() - t_start) * 1000
+            logger.info("[Streaming] 첫 텍스트 청크 확정 — TTFT=%.1fms, %d자", ttft, len(text_chunk))
+
+        text_chunk_count += 1
+
+        # ------------------------------
+        # TTS 스트리밍 및 오디오 청크 분할
+        # ------------------------------
+        # synthesize_streaming_audio: ElevenLabs raw 바이트를 불규칙한 크기로 yield
+        # 무음 경계 우선 flush, max_chunk_bytes 초과 시 강제 flush (하이브리드)
+        t_last_tts_start = time.perf_counter()
+        raw_audio_stream = api_manager.synthesize_streaming_audio(text_chunk)
+
+        async for audio_chunk in streaming_controller.tts_audio_chunker(raw_audio_stream):
+
+            # 첫 오디오 청크 수신 시점 = TTFA
+            if ttfa is None:
+                ttfa = (time.perf_counter() - t_start) * 1000
+                logger.info("[Streaming] 첫 오디오 청크 수신 — TTFA=%.1fms", ttfa)
+
+            audio_chunk_count += 1
+            all_audio.extend(audio_chunk)
+            yield audio_chunk, None
+
+    t_end = time.perf_counter()
+    e2e_latency = (t_end - t_start) * 1000
+
+    # tts_latency: 마지막 텍스트 청크의 TTS 처리 소요 시간 (근사)
+    # 여러 청크에 걸쳐 TTS가 순차 호출되므로 전체 합산이 아닌 마지막 기준으로 기록
+    tts_latency = (t_end - t_last_tts_start) * 1000
+
+    # 레이턴시 측정 완료 후 WAV 저장
+    audio_path = _save_audio(bytes(all_audio), "streaming")
+
+    logger.info(
+        "[Streaming] 파이프라인 완료 — E2E=%.1fms, 텍스트 청크=%d, 오디오 청크=%d, %d bytes, 저장=%s",
+        e2e_latency, text_chunk_count, audio_chunk_count, len(all_audio), audio_path,
+    )
+
+    # ------------------------------
+    # 종료 신호 + 성능 지표 반환
+    # ------------------------------
+    # 빈 바이트와 함께 StreamingMetrics를 yield해 호출 측이 종료를 감지하도록 함
+    # ttft / ttfa가 None이면 오디오가 전혀 생성되지 않은 경우이므로 0.0으로 기록
+    metrics = StreamingMetrics(
+        llm_latency=ttft if ttft is not None else 0.0,
+        tts_latency=tts_latency,
+        e2e_latency=e2e_latency,
+        ttft=ttft if ttft is not None else 0.0,
+        ttfa=ttfa if ttfa is not None else 0.0,
+        text_chunk_count=text_chunk_count,
+        audio_chunk_count=audio_chunk_count,
+    )
+    yield b"", metrics
