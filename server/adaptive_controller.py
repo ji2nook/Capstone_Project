@@ -144,9 +144,11 @@ class AdaptiveController:
         self._session_start: float = time.perf_counter()
         self._last_ws_send_ts: float = 0.0
         self._tts_tracker = _TtsRateTracker()
-        
+
         # 마지막으로 처리한 starvation_count: 새로운 고갈 이벤트 감지
         self._prev_starvation: int = 0
+        # 버퍼 고갈로 MIN_TEXT_CHUNK를 반환한 누적 횟수
+        self._starvation_adjustments: int = 0
 
 
 
@@ -270,6 +272,7 @@ class AdaptiveController:
         # 신규 starvation 이벤트 감지 → 긴급 축소
         if s.buffer_starvation_count > self._prev_starvation:
             self._prev_starvation = s.buffer_starvation_count
+            self._starvation_adjustments += 1
             logger.info(
                 "_compute_text_chunk_size: 버퍼 고갈 감지 (count=%d), MIN_TEXT_CHUNK 반환",
                 s.buffer_starvation_count,
@@ -335,8 +338,13 @@ class AdaptiveController:
 
 
     # ========================================
-    # 스냅샷
+    # 스냅샷 / 집계
     # ========================================
+
+    @property
+    def starvation_adjustments(self) -> int:
+        """버퍼 고갈로 인해 MIN_TEXT_CHUNK를 긴급 반환한 누적 횟수."""
+        return self._starvation_adjustments
 
     def snapshot(self) -> dict:
         """현재 AdaptiveState를 dict로 직렬화. 지표 기록 및 제어 히스토리에 사용."""

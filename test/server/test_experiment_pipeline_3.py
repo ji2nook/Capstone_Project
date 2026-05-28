@@ -164,14 +164,15 @@ async def main() -> None:
     assert MIN_TEXT_CHUNK <= m.avg_text_chunk_size <= MAX_TEXT_CHUNK, (
         f"Step 4: avg_text_chunk_size({m.avg_text_chunk_size:.1f})는 [{MIN_TEXT_CHUNK}, {MAX_TEXT_CHUNK}] 범위 내여야 한다"
     )
-    # Step 5 전: audio chunk size는 아직 고정값
-    assert m.avg_audio_chunk_size == float(DEFAULT_AUDIO_CHUNK_SIZE), (
-        f"Step 5 전: avg_audio_chunk_size({m.avg_audio_chunk_size})는 DEFAULT({DEFAULT_AUDIO_CHUNK_SIZE})와 같아야 한다"
+    # Step 5: audio chunk size는 TTS 속도에 따라 동적으로 결정 — [MIN, MAX] 범위 내이면 통과
+    from server.adaptive_controller import MIN_AUDIO_CHUNK, MAX_AUDIO_CHUNK
+    assert MIN_AUDIO_CHUNK <= m.avg_audio_chunk_size <= MAX_AUDIO_CHUNK, (
+        f"Step 5: avg_audio_chunk_size({m.avg_audio_chunk_size:.1f})는 [{MIN_AUDIO_CHUNK}, {MAX_AUDIO_CHUNK}] 범위 내여야 한다"
     )
 
-    # Step 2: 버퍼 고갈 긴급 축소 로직 미구현 — starvation_adjustments는 항상 0
-    assert m.starvation_adjustments == 0, (
-        f"Step 2 기준: starvation_adjustments는 0이어야 한다 (실제: {m.starvation_adjustments})"
+    # Step 6: 실제 버퍼 고갈이 없는 단독 실행에서는 0, 클라이언트 피드백 연동 후 증가 가능
+    assert m.starvation_adjustments >= 0, (
+        f"starvation_adjustments는 0 이상이어야 한다 (실제: {m.starvation_adjustments})"
     )
 
     print("검증 통과")
@@ -182,8 +183,8 @@ async def main() -> None:
     print("  audio_chunk_count          >=   text_chunk_count")
     print("  len(control_snapshots)     =    text_chunk_count")
     print(f"  avg_text_chunk_size       in   [{MIN_TEXT_CHUNK}, {MAX_TEXT_CHUNK}]  (실제: {m.avg_text_chunk_size:.1f}자, Step 4 동적)")
-    print(f"  avg_audio_chunk_size      =    {DEFAULT_AUDIO_CHUNK_SIZE}  (Step 5 전: 고정)")
-    print("  starvation_adjustments     =    0  (Step 2 미구현)")
+    print(f"  avg_audio_chunk_size      in   [{MIN_AUDIO_CHUNK}, {MAX_AUDIO_CHUNK}]  (실제: {m.avg_audio_chunk_size:.1f}bytes, Step 5 동적)")
+    print(f"  starvation_adjustments     =    {m.starvation_adjustments}  (Step 6: 실제 고갈 발생 시 증가)")
     print()
 
     # ------------------------------

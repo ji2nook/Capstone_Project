@@ -326,6 +326,7 @@ async def run_streaming(
 
 async def run_adaptive(
     prompt: str,
+    controller: AdaptiveController | None = None,
 ) -> AsyncGenerator[tuple[bytes, AdaptiveMetrics | None], None]:
 
     _DONE: object = object()
@@ -339,8 +340,10 @@ async def run_adaptive(
     t_last_tts_start: float = t_start
     full_llm_text: str = ""
 
-    # 파이프라인 시작 시 1회 생성, 이후 각 콜백 지점에 전달
-    controller = AdaptiveController()
+    # 외부에서 주입된 컨트롤러가 있으면 사용 (connection_manager가 on_client_feedback 호출 가능)
+    # 없으면 새로 생성 (독립 실행 및 테스트용)
+    if controller is None:
+        controller = AdaptiveController()
 
     # 텍스트/오디오 청크 크기 결정값 누적 (세션 평균 계산에 사용)
     decided_text_chunk_sizes: list[int] = []
@@ -500,6 +503,6 @@ async def run_adaptive(
         control_snapshots=control_snapshots,
         avg_text_chunk_size=avg_text,
         avg_audio_chunk_size=avg_audio,
-        starvation_adjustments=0,
+        starvation_adjustments=controller.starvation_adjustments,
     )
     yield b"", metrics

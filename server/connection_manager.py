@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 
 from server import api_manager, experiment_pipeline, metrics_server
+from server.adaptive_controller import AdaptiveController
 from server import logger as result_logger
 from server.logger import ClientMetrics
 from server.network_probe import NetworkSnapshot, snapshot as network_snapshot
@@ -194,20 +195,35 @@ async def websocket_endpoint(
 
             # ------------------------------
             # 실험 3: 적응형 스트리밍 파이프라인
-            # run_adaptive()가 청크 크기를 동적으로 결정하며, 실험 2와 동일한 청크 전송 구조를 유지
-            # Step 6에서 청크 전송 루프 내 논블로킹 버퍼 피드백 수신 로직이 추가될 예정
+            # 파이프라인과 공유하는 controller 인스턴스를 미리 생성해 전달.
+            # 각 오디오 청크 전송 직후 5ms 논블로킹으로 클라이언트 피드백을 수신하여
+            # controller.on_client_feedback()을 호출하면 다음 청크 크기 결정에 즉시 반영된다.
             # ------------------------------
             elif experiment == "adaptive":
                 adaptive_metrics = None
                 audio_chunk_count = 0
+                controller = AdaptiveController()
 
-                async for audio_chunk, metrics in experiment_pipeline.run_adaptive(prompt):
+                async for audio_chunk, metrics in experiment_pipeline.run_adaptive(prompt, controller):
                     if metrics is not None:
                         # 종료 신호: run_adaptive()의 마지막 yield (b"", AdaptiveMetrics)
                         adaptive_metrics = metrics
                     elif audio_chunk:
                         await manager.send_chunk(websocket, audio_chunk)
                         audio_chunk_count += 1
+                        # 논블로킹 피드백 수신: 클라이언트가 5ms 내에 버퍼 상태를 보내면 반영
+                        try:
+                            fb_raw = await asyncio.wait_for(
+                                websocket.receive_text(), timeout=0.005
+                            )
+                            fb_data = json.loads(fb_raw)
+                            if fb_data.get("type") == "buffer_feedback":
+                                controller.on_client_feedback(
+                                    fb_data["buffer_level"],
+                                    fb_data["starvation_count"],
+                                )
+                        except (asyncio.TimeoutError, json.JSONDecodeError, KeyError):
+                            pass
 
                 await manager.send_end_signal(websocket)
                 logger.info("[adaptive] 오디오 청크 %d개 전송 완료", audio_chunk_count)

@@ -120,6 +120,26 @@ class InputManager:
             # 서버가 이미 연결을 끊은 경우 — 지표 역전송을 건너뜀
             logger.warning("클라이언트 지표 역전송 실패 — 서버 연결이 이미 닫혔습니다")
 
+    async def send_buffer_feedback(
+        self, buffer_level: int, starvation_count: int
+    ) -> None:
+        """adaptive 모드: 오디오 청크 수신 직후 JitterBuffer 상태를 서버에 즉시 역전송.
+
+        서버는 5ms 타임아웃으로 논블로킹 수신하므로, 이 메서드는 청크 처리 직후 호출해야
+        다음 청크 크기 결정에 반영될 가능성이 높아진다.
+        """
+        if self._ws is None:
+            return
+        try:
+            payload = {
+                "type": "buffer_feedback",
+                "buffer_level": buffer_level,
+                "starvation_count": starvation_count,
+            }
+            await self._ws.send(json.dumps(payload))
+        except ConnectionClosed:
+            logger.warning("버퍼 피드백 역전송 실패 — 서버 연결이 이미 닫혔습니다")
+
     @staticmethod
     async def _read_line() -> str:
         # Prompt.ask()는 블로킹 함수이므로 스레드 풀에 위임해 이벤트 루프가 멈추지 않도록 함
