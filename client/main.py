@@ -246,9 +246,11 @@ async def main() -> None:
 
                         elif isinstance(event, StreamingCycleEnd):
                             # 사이클 종료: 잔여 버퍼 소진 후 스트림 닫기 및 지표 기록
-                            # feed/drain 이 1:1로 실행되므로 일반적으로 잔여 청크는 없지만 방어적으로 처리
-                            while (remaining := jitter_buffer.drain()) is not None:
-                                await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
+                            # buffered_chunks 선확인: walrus 패턴은 빈 버퍼에서 drain()을 한 번 더 호출해 starvation false positive 유발
+                            while jitter_buffer.buffered_chunks > 0:
+                                remaining = jitter_buffer.drain()
+                                if remaining is not None:
+                                    await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
 
                             play_duration = audio_player.close_stream()
 
@@ -321,8 +323,10 @@ async def main() -> None:
                             )
 
                         elif isinstance(event, StreamingCycleEnd):
-                            while (remaining := jitter_buffer.drain()) is not None:
-                                await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
+                            while jitter_buffer.buffered_chunks > 0:
+                                remaining = jitter_buffer.drain()
+                                if remaining is not None:
+                                    await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
 
                             play_duration = audio_player.close_stream()
 
