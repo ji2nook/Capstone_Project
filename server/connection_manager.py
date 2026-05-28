@@ -87,12 +87,6 @@ class ConnectionManager:
         await websocket.send_bytes(b"")
         logger.info("스트리밍 종료 신호 전송 완료")
 
-    async def broadcast_bytes(self, data: bytes) -> None:
-        # 모든 활성 클라이언트에 동일 데이터를 동시에 전송
-        # 실험 3에서 여러 개의 클라이언트 시나리오가 필요할 경우에 사용
-        raise NotImplementedError("실험 3에서 구현 예정")
-
-
 # 모듈 수준 싱글턴: main.py와 엔드포인트 핸들러가 동일 인스턴스 공유
 manager = ConnectionManager()
 
@@ -199,11 +193,42 @@ async def websocket_endpoint(
                     logger.warning("[streaming] 클라이언트 지표 수신 실패 — null로 기록됩니다")
 
             # ------------------------------
-            # 실험 3: 적응형 스트리밍 파이프라인 (미구현)
-            # 네트워크 상태에 따라 청크 크기와 버퍼 전략을 동적으로 조절
+            # 실험 3: 적응형 스트리밍 파이프라인
+            # run_adaptive()가 청크 크기를 동적으로 결정하며, 실험 2와 동일한 청크 전송 구조를 유지
+            # Step 6에서 청크 전송 루프 내 논블로킹 버퍼 피드백 수신 로직이 추가될 예정
             # ------------------------------
             elif experiment == "adaptive":
-                await websocket.send_text("adaptive 파이프라인은 실험 3에서 구현 예정")
+                adaptive_metrics = None
+                audio_chunk_count = 0
+
+                async for audio_chunk, metrics in experiment_pipeline.run_adaptive(prompt):
+                    if metrics is not None:
+                        # 종료 신호: run_adaptive()의 마지막 yield (b"", AdaptiveMetrics)
+                        adaptive_metrics = metrics
+                    elif audio_chunk:
+                        await manager.send_chunk(websocket, audio_chunk)
+                        audio_chunk_count += 1
+
+                await manager.send_end_signal(websocket)
+                logger.info("[adaptive] 오디오 청크 %d개 전송 완료", audio_chunk_count)
+
+                if adaptive_metrics is not None:
+                    metrics_server.record(
+                        adaptive_metrics,
+                        experiment="adaptive",
+                        prompt=prompt,
+                        llm_response=adaptive_metrics.llm_response,
+                        audio_path=adaptive_metrics.audio_path,
+                    )
+
+                # 오디오 전송 후 클라이언트가 역전송한 지표 JSON 수신
+                try:
+                    raw = await websocket.receive_text()
+                    data = json.loads(raw)
+                    client_metrics_list.append(ClientMetrics(**data))
+                    logger.info("[adaptive] 클라이언트 지표 수신 완료")
+                except Exception:
+                    logger.warning("[adaptive] 클라이언트 지표 수신 실패 — null로 기록됩니다")
 
             else:
                 logger.warning("알 수 없는 실험 타입: %s", experiment)
