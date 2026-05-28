@@ -25,8 +25,10 @@ from server.streaming_controller import (
 TEST_PROMPT = "5문장으로 너에 대해서 자기소개해줘."
 
 
-# ===== LLM 텍스트 청킹 =====
 
+# ========================================
+# LLM 텍스트 청킹
+# ========================================
 async def test_llm_hybrid() -> None:
     # 하이브리드 모드: 문장 경계 우선, max_chars 초과 시 강제 flush
     print("=== LLM — 하이브리드 (문장 경계 + max_chars 안전망) ===")
@@ -55,8 +57,9 @@ async def test_llm_fixed_only() -> None:
     print(f"총 {n}개 청크\n")
 
 
-# ===== TTS 오디오 청킹 =====
-
+# ========================================
+# TTS 오디오 청킹
+# ========================================
 def _pcm(amplitude: int, n_samples: int) -> bytes:
     return struct.pack(f"<{n_samples}h", *([amplitude] * n_samples))
 

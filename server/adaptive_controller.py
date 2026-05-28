@@ -7,10 +7,12 @@ from dataclasses import asdict, dataclass
 logger = logging.getLogger(__name__)
 
 
+
 # ========================================
-# 기본 제어 파라미터 (실험 2 고정값과 동일하게 시작)
+# 기본 제어 파라미터
 # ========================================
 
+# 실험 2 고정값과 동일하게 시작
 DEFAULT_TEXT_CHUNK_SIZE: int = 20
 DEFAULT_AUDIO_CHUNK_SIZE: int = 8192
 MIN_TEXT_CHUNK: int = 10
@@ -19,37 +21,49 @@ MIN_AUDIO_CHUNK: int = 4096
 MAX_AUDIO_CHUNK: int = 32768
 
 
+
 # ========================================
 # 모니터링 변수 상태
 # ========================================
 
 @dataclass
 class AdaptiveState:
-    # ── LLM ─────────────────────────────────────────────────────────────────
+    # ----------------------------------------
+    # LLM
+    # ----------------------------------------
     # llm_token_rate: 이동 평균 계산은 Step 4에서 구현, 여기서는 0.0 유지
     llm_token_rate: float = 0.0
     llm_tokens_generated: int = 0      # 누적 수신 토큰 수
     llm_last_token_ts: float = 0.0     # 직전 토큰 수신 시각 (perf_counter)
 
-    # ── TTS ─────────────────────────────────────────────────────────────────
+    # ----------------------------------------
+    # TTS
+    # ----------------------------------------
     # tts_synthesis_rate: 슬라이딩 윈도우 계산은 Step 5에서 구현, 여기서는 0.0 유지
     tts_synthesis_rate: float = 0.0
     tts_last_send_ts: float = 0.0      # 직전 TTS 요청 전송 시각
     tts_last_chunk_size: int = 0       # 직전 TTS 요청 텍스트 문자 수
 
-    # ── 버퍼 (클라이언트 역수신) ─────────────────────────────────────────────
+    # ----------------------------------------
+    # 버퍼 (클라이언트 역수신)
+    # ----------------------------------------
     buffer_level: int = 0              # JitterBuffer 현재 청크 수
     buffer_starvation_count: int = 0   # 누적 버퍼 고갈 횟수
 
-    # ── 네트워크 ─────────────────────────────────────────────────────────────
+    # ----------------------------------------
+    # 네트워크
+    # ----------------------------------------
     # latency_ms: NetworkSnapshot 초기값 주입은 Step 7에서 구현
     latency_ms: float = 0.0
     throughput_bps: float = 0.0        # 최근 전송 처리량 (bytes/s)
     last_send_interval_ms: float = 0.0 # 직전 오디오 청크 전송 간격 (ms)
 
-    # ── 현재 제어 파라미터 (Step 4~7에서 동적 계산값으로 교체) ────────────────
+    # ----------------------------------------
+    # 현재 제어 파라미터 (Step 4~7에서 동적 계산값으로 교체)
+    # ----------------------------------------
     text_chunk_size: int = DEFAULT_TEXT_CHUNK_SIZE
     audio_chunk_size: int = DEFAULT_AUDIO_CHUNK_SIZE
+
 
 
 # ========================================
@@ -69,6 +83,8 @@ class AdaptiveController:
         self._session_start: float = time.perf_counter()
         # on_ws_chunk_sent 내부에서 전송 간격 계산에 사용
         self._last_ws_send_ts: float = 0.0
+
+
 
     # ========================================
     # 상태 업데이트 콜백
@@ -115,6 +131,8 @@ class AdaptiveController:
             starvation_count,
         )
 
+
+
     # ========================================
     # 제어 결정 (Step 1: 고정값 반환)
     # ========================================
@@ -128,6 +146,8 @@ class AdaptiveController:
         """현재 상태 기반 오디오 청크 최대 bytes 반환.
         Step 5에서 TTS 합성 속도 기반 동적 계산으로 교체된다."""
         return self._state.audio_chunk_size
+
+
 
     # ========================================
     # 스냅샷
