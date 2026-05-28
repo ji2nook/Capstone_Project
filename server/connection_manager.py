@@ -196,35 +196,42 @@ async def websocket_endpoint(
             # ------------------------------
             # 실험 3: 적응형 스트리밍 파이프라인
             # 파이프라인과 공유하는 controller 인스턴스를 미리 생성해 전달.
-            # 각 오디오 청크 전송 직후 5ms 논블로킹으로 클라이언트 피드백을 수신하여
-            # controller.on_client_feedback()을 호출하면 다음 청크 크기 결정에 즉시 반영된다.
+            # asyncio.wait_for로 수신을 반복 취소하면 Starlette/uvicorn 내부 waiter 상태가
+            # 오염되어 AssertionError가 발생하므로, 백그라운드 리더 태스크를 사용한다.
             # ------------------------------
             elif experiment == "adaptive":
                 adaptive_metrics = None
                 audio_chunk_count = 0
-                # Step 7: 서버 시작 시 측정한 네트워크 스냅샷을 주입하여 콜드 스타트 편향 방지
                 controller = AdaptiveController(network_snapshot=_net_snapshot)
+                # buffer_feedback 이외의 메시지(최종 클라이언트 지표)를 보관하는 큐
+                _client_msg_queue: asyncio.Queue[str] = asyncio.Queue()
+
+                async def _ws_reader() -> None:
+                    # WebSocket 텍스트 메시지를 지속 수신: buffer_feedback → 컨트롤러, 그 외 → 큐
+                    try:
+                        while True:
+                            raw = await websocket.receive_text()
+                            try:
+                                data = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            if data.get("type") == "buffer_feedback":
+                                controller.on_client_feedback(
+                                    data["buffer_level"], data["starvation_count"]
+                                )
+                            else:
+                                await _client_msg_queue.put(raw)
+                    except Exception:
+                        pass
+
+                reader = asyncio.create_task(_ws_reader())
 
                 async for audio_chunk, metrics in experiment_pipeline.run_adaptive(prompt, controller):
                     if metrics is not None:
-                        # 종료 신호: run_adaptive()의 마지막 yield (b"", AdaptiveMetrics)
                         adaptive_metrics = metrics
                     elif audio_chunk:
                         await manager.send_chunk(websocket, audio_chunk)
                         audio_chunk_count += 1
-                        # 논블로킹 피드백 수신: 클라이언트가 5ms 내에 버퍼 상태를 보내면 반영
-                        try:
-                            fb_raw = await asyncio.wait_for(
-                                websocket.receive_text(), timeout=0.005
-                            )
-                            fb_data = json.loads(fb_raw)
-                            if fb_data.get("type") == "buffer_feedback":
-                                controller.on_client_feedback(
-                                    fb_data["buffer_level"],
-                                    fb_data["starvation_count"],
-                                )
-                        except (asyncio.TimeoutError, json.JSONDecodeError, KeyError):
-                            pass
 
                 await manager.send_end_signal(websocket)
                 logger.info("[adaptive] 오디오 청크 %d개 전송 완료", audio_chunk_count)
@@ -238,14 +245,24 @@ async def websocket_endpoint(
                         audio_path=adaptive_metrics.audio_path,
                     )
 
-                # 오디오 전송 후 클라이언트가 역전송한 지표 JSON 수신
+                # 최종 클라이언트 지표 수신: _ws_reader가 이미 큐에 적재했을 수 있으므로 비블로킹 우선
                 try:
-                    raw = await websocket.receive_text()
+                    try:
+                        raw = _client_msg_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        raw = await asyncio.wait_for(_client_msg_queue.get(), timeout=10.0)
                     data = json.loads(raw)
                     client_metrics_list.append(ClientMetrics(**data))
                     logger.info("[adaptive] 클라이언트 지표 수신 완료")
                 except Exception:
                     logger.warning("[adaptive] 클라이언트 지표 수신 실패 — null로 기록됩니다")
+                finally:
+                    if not reader.done():
+                        reader.cancel()
+                        try:
+                            await reader
+                        except (asyncio.CancelledError, Exception):
+                            pass
 
             else:
                 logger.warning("알 수 없는 실험 타입: %s", experiment)

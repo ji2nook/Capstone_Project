@@ -54,8 +54,7 @@ _EXPERIMENT_OPTIONS: list[tuple[str, str]] = [
     ("adaptive",   "적응형 파이프라인   (실험 3)"),
 ]
 
-# 현재 구현된 실험만 포함 — 실험 3 완성 시 추가
-_IMPLEMENTED: frozenset[str] = frozenset({"sequential", "streaming"})
+_IMPLEMENTED: frozenset[str] = frozenset({"sequential", "streaming", "adaptive"})
 
 _EXPERIMENT_PREFIX: dict[str, str] = {
     "sequential": "exp1",
@@ -100,9 +99,11 @@ def _print_result(
     play_duration: float,
     total_bytes: int | None = None,
     chunk_count: int | None = None,
+    starvation_count: int | None = None,
 ) -> None:
     # 한 사이클 완료 후 지표를 테이블로 출력
     # total_bytes / chunk_count 는 스트리밍 실험에서만 전달됨
+    # starvation_count 는 adaptive 실험에서만 전달됨
     ttfa_ms = (result.t_recv - result.t_send) * 1000
 
     table = Table(box=box.ROUNDED, show_header=False, padding=(0, 2))
@@ -117,6 +118,10 @@ def _print_result(
             table.add_row("청크 수",    f"[cyan]{chunk_count:,}[/cyan]")
     else:
         table.add_row("오디오 크기",    f"[cyan]{len(result.audio_bytes):,} bytes[/cyan]")
+
+    if starvation_count is not None:
+        color = "red" if starvation_count > 0 else "green"
+        table.add_row("버퍼 고갈 횟수", f"[{color}]{starvation_count}[/{color}]")
 
     console.print(table)
     console.print()
@@ -273,6 +278,79 @@ async def main() -> None:
                                 play_duration,
                                 total_bytes=total_bytes,
                                 chunk_count=chunk_count,
+                            )
+
+                # ----------------------------------------
+                # 실험 3: 적응형 스트리밍 파이프라인
+                # ----------------------------------------
+                elif experiment == "adaptive":
+                    # streaming과 동일한 사이클 구조이나,
+                    # StreamingCycleChunk 수신 직후 JitterBuffer 상태를 서버에 즉시 역전송한다.
+                    # 서버는 5ms 타임아웃으로 이 피드백을 수신해 AdaptiveController를 갱신하고
+                    # 다음 청크 크기 결정에 반영한다.
+                    current_prompt = ""
+                    current_t_send = 0.0
+                    current_t_first_recv = 0.0
+                    total_bytes = 0
+                    chunk_count = 0
+
+                    async for event in input_manager.run_streaming():
+                        if isinstance(event, StreamingCycleStart):
+                            jitter_buffer.reset()
+                            audio_player.open_stream()
+                            current_prompt = event.prompt
+                            current_t_send = event.t_send
+                            current_t_first_recv = event.t_send
+                            total_bytes = 0
+                            chunk_count = 0
+
+                        elif isinstance(event, StreamingCycleChunk):
+                            current_t_first_recv = event.t_first_recv
+                            total_bytes += len(event.data)
+                            chunk_count += 1
+
+                            jitter_buffer.feed(event.data)
+                            drained = jitter_buffer.drain()
+                            if drained:
+                                await loop.run_in_executor(None, audio_player.feed_chunk, drained)
+
+                            # 청크 수신 직후 버퍼 상태 피드백 — 서버가 다음 청크 크기 조정에 활용
+                            await input_manager.send_buffer_feedback(
+                                buffer_level=jitter_buffer.buffered_chunks,
+                                starvation_count=jitter_buffer.starvation_count,
+                            )
+
+                        elif isinstance(event, StreamingCycleEnd):
+                            while (remaining := jitter_buffer.drain()) is not None:
+                                await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
+
+                            play_duration = audio_player.close_stream()
+
+                            result = SessionResult(
+                                prompt=current_prompt,
+                                audio_bytes=b"",
+                                t_send=current_t_send,
+                                t_recv=current_t_first_recv,
+                            )
+
+                            buffer_starvation = jitter_buffer.starvation_count
+                            stutter_duration = jitter_buffer.stutter_duration_ms
+
+                            metrics.record(result, play_duration, buffer_starvation, stutter_duration)
+
+                            await input_manager.send_client_metrics({
+                                "ttfa_client": (result.t_recv - result.t_send) * 1000,
+                                "play_duration": play_duration,
+                                "buffer_starvation": buffer_starvation,
+                                "stutter_duration": stutter_duration,
+                            })
+
+                            _print_result(
+                                result,
+                                play_duration,
+                                total_bytes=total_bytes,
+                                chunk_count=chunk_count,
+                                starvation_count=buffer_starvation,
                             )
 
             except ExperimentSwitchRequested:

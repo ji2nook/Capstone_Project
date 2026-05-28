@@ -152,7 +152,9 @@ class InputManager:
         # 서버 연결 및 프롬프트 루프를 실행하는 비동기 제너레이터
         logger.info("[%s] 서버 연결: %s", self._experiment, self._ws_url)
 
-        async with websockets.connect(self._ws_url, max_size=None) as ws:
+        # ping_interval=None: 클라이언트가 keepalive PING을 보내면 서버 transfer_data가
+        # PONG을 전송하려 할 때 오디오 청크 전송과 drain() 충돌로 AssertionError 발생
+        async with websockets.connect(self._ws_url, max_size=None, ping_interval=None) as ws:
             self._ws = ws
             console.print(f"[green]✓[/green] 서버 연결 성공  [dim]({self._ws_url})[/dim]")
             console.print("[dim]종료: q / quit / exit  또는 Ctrl+C[/dim]  |  전환: /switch\n")
@@ -216,7 +218,7 @@ class InputManager:
         # 사이클마다 StreamingCycleStart → N×StreamingCycleChunk → StreamingCycleEnd 순서로 yield
         logger.info("[streaming] 서버 연결: %s", self._ws_url)
 
-        async with websockets.connect(self._ws_url, max_size=None) as ws:
+        async with websockets.connect(self._ws_url, max_size=None, ping_interval=None) as ws:
             self._ws = ws
             console.print(f"[green]✓[/green] 서버 연결 성공  [dim]({self._ws_url})[/dim]")
             console.print("[dim]종료: q / quit / exit 또는 Ctrl+C[/dim]  |  전환: /switch\n")
