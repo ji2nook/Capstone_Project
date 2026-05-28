@@ -2,6 +2,7 @@
 
 import logging
 import time
+from collections import deque
 from dataclasses import asdict, dataclass
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,37 @@ _CHARS_PER_TOKEN_KO: float = 2.5
 
 
 # ========================================
+# TTS 속도 추적기
+# ========================================
+
+class _TtsRateTracker:
+    """1초 슬라이딩 윈도우로 TTS 오디오 출력 속도(bytes/s)를 계산.
+
+    각 수신 샘플을 (타임스탬프, bytes) 형태로 저장하고,
+    WINDOW_S 이전 샘플은 자동으로 제거하여 최근 1초의 평균 속도를 반환한다.
+    """
+
+    WINDOW_S: float = 1.0
+
+    def __init__(self) -> None:
+        self._samples: deque[tuple[float, int]] = deque()
+
+    def record(self, nbytes: int) -> float:
+        """nbytes 수신 기록 후 현재 추정 속도(bytes/s) 반환."""
+        now = time.perf_counter()
+        self._samples.append((now, nbytes))
+        # 윈도우 밖 오래된 샘플 제거
+        cutoff = now - self.WINDOW_S
+        while self._samples and self._samples[0][0] < cutoff:
+            self._samples.popleft()
+        if len(self._samples) < 2:
+            return 0.0
+        elapsed = self._samples[-1][0] - self._samples[0][0]
+        total_bytes = sum(b for _, b in self._samples)
+        return total_bytes / elapsed if elapsed > 0 else 0.0
+
+
+# ========================================
 # 모니터링 변수 상태
 # ========================================
 
@@ -46,8 +78,7 @@ class AdaptiveState:
     # ----------------------------------------
     # TTS
     # ----------------------------------------
-    # tts_synthesis_rate: 슬라이딩 윈도우 계산은 Step 5에서 구현, 여기서는 0.0 유지
-    tts_synthesis_rate: float = 0.0
+    tts_synthesis_rate: float = 0.0         # 슬라이딩 윈도우 기반 bytes/s (on_tts_audio_received 갱신)
     tts_last_send_ts: float = 0.0      # 직전 TTS 요청 전송 시각
     tts_last_chunk_size: int = 0       # 직전 TTS 요청 텍스트 문자 수
 
@@ -69,7 +100,7 @@ class AdaptiveState:
     # 현재 제어 파라미터 (Step 4~7에서 동적 계산값으로 교체)
     # ----------------------------------------
     text_chunk_size: int = DEFAULT_TEXT_CHUNK_SIZE    # decide_text_chunk_size() 호출 시 갱신
-    audio_chunk_size: int = DEFAULT_AUDIO_CHUNK_SIZE  # Step 5에서 동적 계산으로 교체
+    audio_chunk_size: int = DEFAULT_AUDIO_CHUNK_SIZE  # decide_audio_chunk_size() 호출 시 갱신
 
 
 
@@ -82,13 +113,13 @@ class AdaptiveController:
 
     파이프라인 각 지점에서 on_*() 콜백을 호출하여 AdaptiveState를 갱신하고,
     decide_*() 메서드로 다음 청크 크기를 결정한다.
-    Step 1에서는 decide_*()가 고정값을 반환하며, Step 4~7에서 실제 제어 로직으로 교체된다.
     """
 
     def __init__(self) -> None:
         self._state = AdaptiveState()
         self._session_start: float = time.perf_counter()
         self._last_ws_send_ts: float = 0.0
+        self._tts_tracker = _TtsRateTracker()
 
 
 
@@ -124,8 +155,10 @@ class AdaptiveController:
         )
 
     def on_tts_audio_received(self, audio_bytes: int) -> None:
-        """TTS 오디오 청크 수신 시 호출. 합성 속도 계산은 Step 5에서 구현."""
-        logger.debug("on_tts_audio_received: %d bytes", audio_bytes)
+        """TTS 오디오 청크 수신 시 호출. 슬라이딩 윈도우로 합성 속도(bytes/s) 갱신."""
+        rate = self._tts_tracker.record(audio_bytes)
+        self._state.tts_synthesis_rate = rate
+        logger.debug("on_tts_audio_received: %d bytes, rate=%.0f B/s", audio_bytes, rate)
 
     def on_ws_chunk_sent(self, chunk_bytes: int, send_ts: float) -> None:
         """WebSocket 청크 전송 후 호출. 전송 간격 및 처리량 갱신."""
@@ -155,7 +188,7 @@ class AdaptiveController:
 
 
     # ========================================
-    # 제어 결정 (Step 1: 고정값 반환)
+    # 제어 결정
     # ========================================
 
     def decide_text_chunk_size(self) -> int:
@@ -177,9 +210,24 @@ class AdaptiveController:
         return size
 
     def decide_audio_chunk_size(self) -> int:
-        """현재 상태 기반 오디오 청크 최대 bytes 반환.
-        Step 5에서 TTS 합성 속도 기반 동적 계산으로 교체된다."""
-        return self._state.audio_chunk_size
+        """TTS 합성 속도(bytes/s) 기반으로 오디오 청크 최대 bytes를 동적 계산.
+
+        빠른 합성 → 큰 청크로 전송 효율 향상,
+        느린 합성 → 작은 청크로 첫 오디오 수신 지연(TTFA) 단축.
+        rate_factor = clamp(rate / 30000.0, 0.5, 2.0) — 30000 B/s를 기준(factor=1.0)으로 정규화.
+        PCM 16-bit 경계(2바이트)로 정렬하여 샘플 잘림을 방지한다.
+        """
+        rate = self._state.tts_synthesis_rate
+        if rate <= 0.0:
+            size = DEFAULT_AUDIO_CHUNK_SIZE
+        else:
+            rate_factor = _clamp(rate / 30000.0, 0.5, 2.0)
+            dynamic_size = DEFAULT_AUDIO_CHUNK_SIZE * rate_factor
+            size = int(_clamp(dynamic_size, MIN_AUDIO_CHUNK, MAX_AUDIO_CHUNK))
+        # PCM 16-bit(2바이트) 경계 정렬
+        size = (size // 2) * 2
+        self._state.audio_chunk_size = size
+        return size
 
 
 
