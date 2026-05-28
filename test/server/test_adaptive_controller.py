@@ -6,6 +6,8 @@ sys.path.append(".")
 from server.adaptive_controller import (
     DEFAULT_AUDIO_CHUNK_SIZE,
     DEFAULT_TEXT_CHUNK_SIZE,
+    MIN_TEXT_CHUNK,
+    MAX_TEXT_CHUNK,
     AdaptiveController,
 )
 
@@ -51,7 +53,9 @@ snap = ctrl.snapshot()
 
 check("llm_tokens_generated == 3", snap["llm_tokens_generated"], 3)
 check("llm_last_token_ts > 0", snap["llm_last_token_ts"] > 0, True)
-check("decide_text_chunk_size 변화 없음 (더미)", ctrl.decide_text_chunk_size(), DEFAULT_TEXT_CHUNK_SIZE)
+# 방법 A: rate는 on_tts_chunk_sent()에서 갱신 — on_llm_token()만으로는 0.0 유지
+check("on_llm_token만으로는 rate = 0.0", snap["llm_token_rate"], 0.0)
+check("rate=0 → DEFAULT 반환", ctrl.decide_text_chunk_size(), DEFAULT_TEXT_CHUNK_SIZE)
 
 
 
@@ -136,5 +140,55 @@ expected_keys = {
 }
 missing = expected_keys - snap.keys()
 check("누락 필드 없음", missing, set())
+
+# ========================================
+# 8. LLM 토큰 속도 → 텍스트 청크 크기 제어 (Step 4)
+# ========================================
+section("8. LLM 토큰 속도 → 텍스트 청크 크기 제어 (Step 4)")
+
+# rate → chunk size 결정 테이블 (state 직접 조작 — sleep 없음)
+print("\n  [rate → chunk size 결정 테이블]")
+print(f"  {'rate (t/s)':>12}  {'chunk size':>10}  비고")
+print(f"  {'-'*55}")
+ctrl_table = AdaptiveController()
+for rate, note in [
+    (0.0,  "초기 상태 — DEFAULT 반환"),
+    (10.0, "느림 (rate_factor=0.5, clamp 하한)"),
+    (20.0, "느림"),
+    (30.0, "기준 (rate_factor=1.0)"),
+    (40.0, "보통"),
+    (60.0, "빠름"),
+    (90.0, "빠름 (rate_factor=2.0, clamp 상한)"),
+]:
+    ctrl_table._state.llm_token_rate = rate
+    size = ctrl_table.decide_text_chunk_size()
+    print(f"  {rate:>10.1f} t/s  {size:>8d}자  {note}")
+
+# 방향성 검증
+ctrl_table._state.llm_token_rate = 60.0
+size_fast = ctrl_table.decide_text_chunk_size()
+ctrl_table._state.llm_token_rate = 10.0
+size_slow = ctrl_table.decide_text_chunk_size()
+ctrl_table._state.llm_token_rate = 0.0
+size_zero = ctrl_table.decide_text_chunk_size()
+
+check("rate=0 → DEFAULT 반환", size_zero, DEFAULT_TEXT_CHUNK_SIZE)
+check("빠른 rate(60) → 느린 rate(10) 보다 작은 청크", size_fast < size_slow, True)
+check("size_fast in [MIN, MAX]", MIN_TEXT_CHUNK <= size_fast <= MAX_TEXT_CHUNK, True)
+check("size_slow in [MIN, MAX]", MIN_TEXT_CHUNK <= size_slow <= MAX_TEXT_CHUNK, True)
+
+# 청크 간격 기반 rate 측정 시뮬레이션
+# 250ms 간격 × 5청크: 각 청크 10자 → chars/s ≈ 40, tokens/s ≈ 16 (40 / 2.5)
+print("\n  [청크 간격 시뮬레이션 (250ms 간격 × 5 청크, 각 10자 → ≈ 16 t/s)]")
+ctrl_sim = AdaptiveController()
+for _ in range(5):
+    ctrl_sim.on_tts_chunk_sent(text_len=10)
+    time.sleep(0.25)
+snap_sim = ctrl_sim.snapshot()
+size_sim = ctrl_sim.decide_text_chunk_size()
+print(f"  측정된 rate: {snap_sim['llm_token_rate']:.1f} t/s → chunk size: {size_sim}자")
+check("시뮬레이션 rate > 0", snap_sim["llm_token_rate"] > 0, True)
+check("시뮬레이션 chunk in [MIN, MAX]", MIN_TEXT_CHUNK <= size_sim <= MAX_TEXT_CHUNK, True)
+
 
 print("\n완료")

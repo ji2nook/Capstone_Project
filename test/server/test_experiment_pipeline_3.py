@@ -17,7 +17,7 @@ import sys
 sys.path.append(".")
 
 from server.experiment_pipeline import AdaptiveMetrics, run_adaptive
-from server.adaptive_controller import DEFAULT_AUDIO_CHUNK_SIZE, DEFAULT_TEXT_CHUNK_SIZE
+from server.adaptive_controller import DEFAULT_AUDIO_CHUNK_SIZE, MIN_TEXT_CHUNK, MAX_TEXT_CHUNK
 from server import metrics_server
 
 
@@ -160,12 +160,13 @@ async def main() -> None:
         assert "llm_tokens_generated" in snap, "스냅샷에 llm_tokens_generated 필드가 없다"
         assert "buffer_level" in snap, "스냅샷에 buffer_level 필드가 없다"
 
-    # Step 2: decide_*()가 고정값을 반환하므로 평균 = DEFAULT 값과 같아야 함
-    assert m.avg_text_chunk_size == float(DEFAULT_TEXT_CHUNK_SIZE), (
-        f"Step 2 기준: avg_text_chunk_size({m.avg_text_chunk_size})는 DEFAULT({DEFAULT_TEXT_CHUNK_SIZE})와 같아야 한다"
+    # Step 4: avg_text_chunk_size는 LLM 속도에 따라 동적으로 결정 — [MIN, MAX] 범위 내이면 통과
+    assert MIN_TEXT_CHUNK <= m.avg_text_chunk_size <= MAX_TEXT_CHUNK, (
+        f"Step 4: avg_text_chunk_size({m.avg_text_chunk_size:.1f})는 [{MIN_TEXT_CHUNK}, {MAX_TEXT_CHUNK}] 범위 내여야 한다"
     )
+    # Step 5 전: audio chunk size는 아직 고정값
     assert m.avg_audio_chunk_size == float(DEFAULT_AUDIO_CHUNK_SIZE), (
-        f"Step 2 기준: avg_audio_chunk_size({m.avg_audio_chunk_size})는 DEFAULT({DEFAULT_AUDIO_CHUNK_SIZE})와 같아야 한다"
+        f"Step 5 전: avg_audio_chunk_size({m.avg_audio_chunk_size})는 DEFAULT({DEFAULT_AUDIO_CHUNK_SIZE})와 같아야 한다"
     )
 
     # Step 2: 버퍼 고갈 긴급 축소 로직 미구현 — starvation_adjustments는 항상 0
@@ -174,15 +175,15 @@ async def main() -> None:
     )
 
     print("검증 통과")
-    print("  llm_latency            = ttft")
-    print("  ttft                   < ttfa")
-    print("  ttfa                   ≤ e2e_latency")
-    print("  text_chunk_count       ≥ 1")
-    print("  audio_chunk_count      ≥ text_chunk_count")
-    print("  len(control_snapshots) = text_chunk_count")
-    print(f"  avg_text_chunk_size    = {DEFAULT_TEXT_CHUNK_SIZE}  (Step 2 고정)")
-    print(f"  avg_audio_chunk_size   = {DEFAULT_AUDIO_CHUNK_SIZE}  (Step 2 고정)")
-    print("  starvation_adjustments = 0  (Step 2 미구현)")
+    print("  llm_latency                =    ttft")
+    print("  ttft                       <    ttfa")
+    print("  ttfa                       <=   e2e_latency")
+    print("  text_chunk_count           >=   1")
+    print("  audio_chunk_count          >=   text_chunk_count")
+    print("  len(control_snapshots)     =    text_chunk_count")
+    print(f"  avg_text_chunk_size       in   [{MIN_TEXT_CHUNK}, {MAX_TEXT_CHUNK}]  (실제: {m.avg_text_chunk_size:.1f}자, Step 4 동적)")
+    print(f"  avg_audio_chunk_size      =    {DEFAULT_AUDIO_CHUNK_SIZE}  (Step 5 전: 고정)")
+    print("  starvation_adjustments     =    0  (Step 2 미구현)")
     print()
 
     # ------------------------------

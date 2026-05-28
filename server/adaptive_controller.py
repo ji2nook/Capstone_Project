@@ -21,6 +21,14 @@ MIN_AUDIO_CHUNK: int = 4096
 MAX_AUDIO_CHUNK: int = 32768
 
 
+def _clamp(value: float, lo: float, hi: float) -> float:
+    """value를 [lo, hi] 범위로 클리핑."""
+    return max(lo, min(hi, value))
+
+
+# 텍스트 청크 간격 기반 rate 계산 시 chars → tokens 환산 상수 (한국어 기준)
+_CHARS_PER_TOKEN_KO: float = 2.5
+
 
 # ========================================
 # 모니터링 변수 상태
@@ -31,8 +39,7 @@ class AdaptiveState:
     # ----------------------------------------
     # LLM
     # ----------------------------------------
-    # llm_token_rate: 이동 평균 계산은 Step 4에서 구현, 여기서는 0.0 유지
-    llm_token_rate: float = 0.0
+    llm_token_rate: float = 0.0           # 텍스트 청크 간격 기반 추정 tokens/s (on_tts_chunk_sent 갱신)
     llm_tokens_generated: int = 0      # 누적 수신 토큰 수
     llm_last_token_ts: float = 0.0     # 직전 토큰 수신 시각 (perf_counter)
 
@@ -61,8 +68,8 @@ class AdaptiveState:
     # ----------------------------------------
     # 현재 제어 파라미터 (Step 4~7에서 동적 계산값으로 교체)
     # ----------------------------------------
-    text_chunk_size: int = DEFAULT_TEXT_CHUNK_SIZE
-    audio_chunk_size: int = DEFAULT_AUDIO_CHUNK_SIZE
+    text_chunk_size: int = DEFAULT_TEXT_CHUNK_SIZE    # decide_text_chunk_size() 호출 시 갱신
+    audio_chunk_size: int = DEFAULT_AUDIO_CHUNK_SIZE  # Step 5에서 동적 계산으로 교체
 
 
 
@@ -81,7 +88,6 @@ class AdaptiveController:
     def __init__(self) -> None:
         self._state = AdaptiveState()
         self._session_start: float = time.perf_counter()
-        # on_ws_chunk_sent 내부에서 전송 간격 계산에 사용
         self._last_ws_send_ts: float = 0.0
 
 
@@ -91,16 +97,31 @@ class AdaptiveController:
     # ========================================
 
     def on_llm_token(self, token: str) -> None:
-        """LLM 토큰 1개 수신 시 호출. 누적 토큰 수 및 수신 시각 갱신."""
+        """LLM 토큰 1개 수신 시 호출. 누적 카운트 및 수신 시각 갱신.
+        rate는 on_tts_chunk_sent()에서 청크 확정 간격 기반으로 계산된다."""
         self._state.llm_tokens_generated += 1
         self._state.llm_last_token_ts = time.perf_counter()
         logger.debug("on_llm_token: 누적=%d", self._state.llm_tokens_generated)
 
     def on_tts_chunk_sent(self, text_len: int) -> None:
-        """TTS API 요청 직전 호출. 요청 시각 및 텍스트 길이 기록."""
-        self._state.tts_last_send_ts = time.perf_counter()
+        """TTS API 요청 직전 호출. 청크 확정 간격으로 LLM 문자 생성 속도를 추정한다.
+
+        asyncio 배치 처리 영향을 피하기 위해 토큰 단위가 아닌 텍스트 청크 단위로 측정한다.
+        첫 번째 청크는 이전 간격이 없으므로 rate = 0.0 유지 (DEFAULT 청크 크기 사용).
+        """
+        now = time.perf_counter()
+        if self._state.tts_last_send_ts > 0:
+            interval_s = now - self._state.tts_last_send_ts
+            if interval_s > 0:
+                chars_per_s = text_len / interval_s
+                self._state.llm_token_rate = chars_per_s / _CHARS_PER_TOKEN_KO
+        self._state.tts_last_send_ts = now
         self._state.tts_last_chunk_size = text_len
-        logger.debug("on_tts_chunk_sent: %d자", text_len)
+        logger.debug(
+            "on_tts_chunk_sent: %d자, rate=%.1f t/s",
+            text_len,
+            self._state.llm_token_rate,
+        )
 
     def on_tts_audio_received(self, audio_bytes: int) -> None:
         """TTS 오디오 청크 수신 시 호출. 합성 속도 계산은 Step 5에서 구현."""
@@ -138,9 +159,22 @@ class AdaptiveController:
     # ========================================
 
     def decide_text_chunk_size(self) -> int:
-        """현재 상태 기반 텍스트 청크 최대 문자 수 반환.
-        Step 4에서 LLM 토큰 속도 기반 동적 계산으로 교체된다."""
-        return self._state.text_chunk_size
+        """LLM 토큰 속도(tokens/s) 기반으로 텍스트 청크 최대 문자 수를 동적 계산.
+
+        토큰이 빠를수록 작은 청크로 자주 전송해 TTS 응답을 앞당기고,
+        느릴수록 큰 청크로 TTS 큐 버퍼를 확보한다.
+        rate_factor = clamp(rate / 30.0, 0.5, 2.0) — 30 t/s를 기준(factor=1.0)으로 정규화.
+        """
+        rate = self._state.llm_token_rate
+        if rate <= 0.0:
+            # 초기 단계(토큰 2개 미만)는 기본값 유지
+            size = DEFAULT_TEXT_CHUNK_SIZE
+        else:
+            rate_factor = _clamp(rate / 30.0, 0.5, 2.0)
+            dynamic_size = DEFAULT_TEXT_CHUNK_SIZE / rate_factor
+            size = int(_clamp(dynamic_size, MIN_TEXT_CHUNK, MAX_TEXT_CHUNK))
+        self._state.text_chunk_size = size
+        return size
 
     def decide_audio_chunk_size(self) -> int:
         """현재 상태 기반 오디오 청크 최대 bytes 반환.

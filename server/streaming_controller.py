@@ -3,7 +3,7 @@
 import logging
 import re
 import struct
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +30,17 @@ _PCM_SAMPLE_WIDTH: int = 2  # 16-bit signed
 
 async def llm_text_chunker(
     token_stream: AsyncGenerator[str, None],
-    max_chars: int = TEXT_CHUNK_SIZE,
+    max_chars: int | Callable[[], int] = TEXT_CHUNK_SIZE,
     use_sentence_end: bool = True,
 ) -> AsyncGenerator[str, None]:
     # 문장 경계 감지와 고정 문장 길이 감지 방식을 결합한 하이브리드 방식으로 청크 분할
+    # max_chars에 callable을 넘기면 매 토큰마다 호출해 동적으로 크기를 재평가한다
+    if callable(max_chars):
+        _get_max = max_chars
+    else:
+        _limit = max_chars
+        _get_max = lambda: _limit
+
     buffer = ""
     async for token in token_stream:
         buffer += token
@@ -48,8 +55,8 @@ async def llm_text_chunker(
                 if chunk:
                     logger.debug("llm_text_chunker: 문장 경계 %d자", len(chunk))
                     yield chunk
-        # 경계 처리 후 남은 버퍼가 max_chars 이상이면 강제 flush
-        if len(buffer) >= max_chars:
+        # 경계 처리 후 남은 버퍼가 현재 max_chars 이상이면 강제 flush
+        if len(buffer) >= _get_max():
             logger.debug("llm_text_chunker: max_chars 초과 %d자", len(buffer))
             yield buffer.strip()
             buffer = ""

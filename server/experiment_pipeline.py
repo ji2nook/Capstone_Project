@@ -401,12 +401,10 @@ async def run_adaptive(
         # 토큰 인터셉터를 통해 각 토큰을 컨트롤러에 기록한 뒤 청커로 전달
         token_stream = _token_interceptor(raw_token_stream)
 
-        # max_chars: 파이프라인 시작 시 1회 결정 (Step 2 기준)
-        # Step 4에서 청크별 동적 결정으로 전환할 때 이 구조를 개선할 예정
-        initial_text_chunk_size = controller.decide_text_chunk_size()
+        # controller.decide_text_chunk_size를 callable로 전달 — 매 토큰마다 현재 속도 기반으로 재평가
         text_chunks = streaming_controller.llm_text_chunker(
             token_stream,
-            max_chars=initial_text_chunk_size,
+            max_chars=controller.decide_text_chunk_size,
             use_sentence_end=True,
         )
 

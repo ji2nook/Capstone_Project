@@ -115,11 +115,11 @@ async def main() -> None:
     assert len(all_audio) > 0, "오디오 바이트가 비어 있으면 안 된다"
 
     print("검증 통과")
-    print("  llm_latency      = ttft")
-    print("  ttft             < ttfa")
-    print("  ttfa             ≤ e2e_latency")
-    print("  text_chunk_count ≥ 1")
-    print("  audio_chunk_count ≥ text_chunk_count")
+    print("  llm_latency        =  ttft")
+    print("  ttft               <  ttfa")
+    print("  ttfa               <= e2e_latency")
+    print("  text_chunk_count   >= 1")
+    print("  audio_chunk_count  >= text_chunk_count")
     print()
 
     # ------------------------------
