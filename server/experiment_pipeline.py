@@ -6,6 +6,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,7 +19,15 @@ from server.audio_utils import save_pcm_as_wav
 
 _AUDIO_DIR = Path("results") / "audio"
 
+# TTS 지연 스트레스 배수 — 텍스트 청크 문자당 추가 딜레이(ms).
+# 0이면 비활성화(기본값). 예: TTS_STRESS_MS_PER_CHAR=5 → 20자 청크에 100ms 추가.
+# exp3 적응형 파이프라인이 청크 크기를 축소해 딜레이를 줄이는 반응을 유도하기 위한 실험용 변수.
+_TTS_STRESS_MS_PER_CHAR: float = float(os.environ.get("TTS_STRESS_MS_PER_CHAR", "0"))
+
 logger = logging.getLogger(__name__)
+
+if _TTS_STRESS_MS_PER_CHAR > 0:
+    logger.info("TTS 스트레스 시뮬레이션 활성화 — %.1fms/자 (20자 기준 %.0fms)", _TTS_STRESS_MS_PER_CHAR, 20 * _TTS_STRESS_MS_PER_CHAR)
 
 # ========================================
 # 성능 지표 데이터 클래스
@@ -217,6 +226,8 @@ async def run_streaming(
     # 이전 청크의 오디오가 클라이언트로 전송되는 동안 다음 청크의 TTS가 병렬로 실행됨
     async def _tts_worker(text_chunk: str, audio_q: asyncio.Queue) -> None:
         try:
+            if _TTS_STRESS_MS_PER_CHAR > 0:
+                await asyncio.sleep(len(text_chunk) * _TTS_STRESS_MS_PER_CHAR / 1000)
             raw_audio_stream = api_manager.synthesize_streaming_audio(text_chunk)
             async for audio_chunk in streaming_controller.tts_audio_chunker(raw_audio_stream):
                 await audio_q.put(audio_chunk)
@@ -381,6 +392,8 @@ async def run_adaptive(
         audio_chunk_size = controller.decide_audio_chunk_size()
         decided_audio_chunk_sizes.append(audio_chunk_size)
         try:
+            if _TTS_STRESS_MS_PER_CHAR > 0:
+                await asyncio.sleep(len(text_chunk) * _TTS_STRESS_MS_PER_CHAR / 1000)
             raw_audio_stream = api_manager.synthesize_streaming_audio(text_chunk)
             async for audio_chunk in streaming_controller.tts_audio_chunker(
                 raw_audio_stream,
