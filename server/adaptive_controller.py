@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TEXT_CHUNK_SIZE: int = 20
 DEFAULT_AUDIO_CHUNK_SIZE: int = 8192
 MIN_TEXT_CHUNK: int = 10
-MAX_TEXT_CHUNK: int = 120
+MAX_TEXT_CHUNK: int = 60
 MIN_AUDIO_CHUNK: int = 4096
 MAX_AUDIO_CHUNK: int = 32768
 
@@ -240,21 +240,25 @@ class AdaptiveController:
 
     def _norm_llm_rate(self, rate: float) -> float:
         """LLM 토큰 속도 → [0, 1]. 느릴수록 1.0 (큰 청크 선호, 역관계).
-        rate=0(초기) → 0.5 중립, rate=60 t/s → 0.0."""
+        rate=0(초기) → 0.5 중립, rate=100 t/s → 0.0."""
         if rate <= 0.0:
             return 0.5
-        return 1.0 - _clamp(rate / 60.0, 0.0, 1.0)
+        return 1.0 - _clamp(rate / 100.0, 0.0, 1.0)
 
     def _norm_tts_rate(self, rate: float) -> float:
         """TTS 합성 속도 → [0, 1]. 빠를수록 1.0 (큰 청크 가능, 정관계).
-        rate=0(초기) → 0.5 중립, rate=60000 B/s → 1.0."""
+        rate=0(초기) → 0.5 중립, rate=500000 B/s → 1.0.
+        실측 범위(370K~1.3M B/s)를 반영해 60K에서 상향 조정."""
         if rate <= 0.0:
             return 0.5
-        return _clamp(rate / 60_000.0, 0.0, 1.0)
+        return _clamp(rate / 500_000.0, 0.0, 1.0)
 
     def _norm_buffer(self, level: int) -> float:
         """버퍼 청크 수 → [0, 1]. 많을수록 1.0 (여유 있음, 정관계).
-        level=0 → 0.0(위험), level=10 이상 → 1.0."""
+        level=0 && starvation=0: 초기 상태로 보고 0.5 중립 반환.
+        level=0 && starvation>0: 0.0 (실제 고갈 위험)."""
+        if level == 0 and self._state.buffer_starvation_count == 0:
+            return 0.5
         return _clamp(level / 10.0, 0.0, 1.0)
 
     def _norm_latency(self, latency_ms: float) -> float:
@@ -266,10 +270,11 @@ class AdaptiveController:
 
     def _norm_throughput(self, throughput_bps: float) -> float:
         """처리량 → [0, 1]. 높을수록 1.0 (전송 용량 충분, 정관계).
-        throughput=0(초기) → 0.5 중립, 100 KB/s 이상 → 1.0."""
+        throughput=0(초기) → 0.5 중립, 8 MB/s 이상 → 1.0.
+        실측 네트워크(80 Mbps = 10 MB/s) 기준으로 100K에서 상향 조정."""
         if throughput_bps <= 0.0:
             return 0.5
-        return _clamp(throughput_bps / 100_000.0, 0.0, 1.0)
+        return _clamp(throughput_bps / 8_000_000.0, 0.0, 1.0)
 
 
 

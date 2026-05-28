@@ -221,8 +221,10 @@ async def websocket_endpoint(
                                 )
                             else:
                                 await _client_msg_queue.put(raw)
-                    except Exception:
-                        pass
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning("[adaptive] _ws_reader 종료: %s", exc)
 
                 reader = asyncio.create_task(_ws_reader())
 
@@ -246,11 +248,12 @@ async def websocket_endpoint(
                     )
 
                 # 최종 클라이언트 지표 수신: _ws_reader가 이미 큐에 적재했을 수 있으므로 비블로킹 우선
+                # timeout: 클라이언트가 오디오 재생 완료 후 역전송하므로 재생 시간만큼 여유를 줌
                 try:
                     try:
                         raw = _client_msg_queue.get_nowait()
                     except asyncio.QueueEmpty:
-                        raw = await asyncio.wait_for(_client_msg_queue.get(), timeout=10.0)
+                        raw = await asyncio.wait_for(_client_msg_queue.get(), timeout=60.0)
                     data = json.loads(raw)
                     client_metrics_list.append(ClientMetrics(**data))
                     logger.info("[adaptive] 클라이언트 지표 수신 완료")
