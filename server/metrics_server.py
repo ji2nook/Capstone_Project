@@ -4,7 +4,12 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from server.experiment_pipeline import BaseMetrics, SequentialMetrics, StreamingMetrics
+from server.experiment_pipeline import (
+    BaseMetrics,
+    SequentialMetrics,
+    StreamingMetrics,
+    AdaptiveMetrics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +35,11 @@ class MetricRecord:
     # 실험 2·3 전용 (실험 1에서는 None)
     text_chunk_count: int | None = None      # llm_text_chunker가 생성한 텍스트 청크 수
     audio_chunk_count: int | None = None     # tts_audio_chunker가 생성한 오디오 청크 수
+    # 실험 3 전용 (실험 1·2에서는 None)
+    avg_text_chunk_size: float | None = None         # 세션 평균 텍스트 청크 크기 (자)
+    avg_audio_chunk_size: float | None = None        # 세션 평균 오디오 청크 크기 (bytes)
+    starvation_adjustments: int | None = None        # 버퍼 고갈로 인한 긴급 축소 횟수
+    control_snapshots: list[dict] | None = None      # 텍스트 청크 확정 시점별 AdaptiveState 스냅샷
     # MOS 평가 결과 (오프라인 평가 시 채워짐)
     utmos: float | None = None               # UTMOS22: TTS 음성 자연스러움 (1~5)
     nisqa_mos: float | None = None           # NISQA: 종합 음질 점수 (1~5)
@@ -61,22 +71,33 @@ def record(
     audio_path: str = "",
 ) -> None:
     # 실험 타입별로 ttft·ttfa 및 전용 필드를 isinstance로 명시적 추출
+    text_chunk_count: int | None = None
+    audio_chunk_count: int | None = None
+    avg_text_chunk_size: float | None = None
+    avg_audio_chunk_size: float | None = None
+    starvation_adjustments: int | None = None
+    control_snapshots: list[dict] | None = None
+
     if isinstance(metrics, SequentialMetrics):
         ttft = metrics.ttft
         ttfa = metrics.ttfa
-        text_chunk_count: int | None = None
-        audio_chunk_count: int | None = None
     elif isinstance(metrics, StreamingMetrics):
         ttft = metrics.ttft
         ttfa = metrics.ttfa
         text_chunk_count = metrics.text_chunk_count
         audio_chunk_count = metrics.audio_chunk_count
+    elif isinstance(metrics, AdaptiveMetrics):
+        ttft = metrics.ttft
+        ttfa = metrics.ttfa
+        text_chunk_count = metrics.text_chunk_count
+        audio_chunk_count = metrics.audio_chunk_count
+        avg_text_chunk_size = metrics.avg_text_chunk_size
+        avg_audio_chunk_size = metrics.avg_audio_chunk_size
+        starvation_adjustments = metrics.starvation_adjustments
+        control_snapshots = metrics.control_snapshots if metrics.control_snapshots else None
     else:
-        # 실험 3 등 미래 실험 타입 — 공통 필드만 기록
         ttft = 0.0
         ttfa = 0.0
-        text_chunk_count = None
-        audio_chunk_count = None
 
     entry = MetricRecord(
         timestamp=datetime.now(tz=timezone.utc).isoformat(),
@@ -91,6 +112,10 @@ def record(
         audio_path=audio_path,
         text_chunk_count=text_chunk_count,
         audio_chunk_count=audio_chunk_count,
+        avg_text_chunk_size=avg_text_chunk_size,
+        avg_audio_chunk_size=avg_audio_chunk_size,
+        starvation_adjustments=starvation_adjustments,
+        control_snapshots=control_snapshots,
     )
 
     _records.append(entry)
@@ -99,8 +124,14 @@ def record(
         f" | 텍스트 청크={text_chunk_count} 오디오 청크={audio_chunk_count}"
         if text_chunk_count is not None else ""
     )
+    adaptive_info = (
+        f" | 평균 텍스트 청크={avg_text_chunk_size:.1f}자"
+        f" 평균 오디오 청크={avg_audio_chunk_size:.0f}bytes"
+        f" 긴급 축소={starvation_adjustments}회"
+        if avg_text_chunk_size is not None else ""
+    )
     logger.info(
-        "지표 기록 [%s] LLM=%.1fms TTS=%.1fms E2E=%.1fms TTFT=%.1fms TTFA=%.1fms%s",
+        "지표 기록 [%s] LLM=%.1fms TTS=%.1fms E2E=%.1fms TTFT=%.1fms TTFA=%.1fms%s%s",
         experiment,
         entry.llm_latency,
         entry.tts_latency,
@@ -108,6 +139,7 @@ def record(
         entry.ttft,
         entry.ttfa,
         chunk_info,
+        adaptive_info,
     )
 
 

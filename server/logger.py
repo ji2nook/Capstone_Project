@@ -93,6 +93,17 @@ def _build_streaming_info(row: dict) -> dict | None:
     }
 
 
+def _build_adaptive_info(row: dict) -> dict | None:
+    # 실험 3 전용 적응형 제어 요약 섹션 — 실험 1·2에서는 None 반환
+    if row.get("avg_text_chunk_size") is None:
+        return None
+    return {
+        "avg_text_chunk_size": row["avg_text_chunk_size"],
+        "avg_audio_chunk_size": row["avg_audio_chunk_size"],
+        "starvation_adjustments": row.get("starvation_adjustments", 0),
+    }
+
+
 def _to_summary_row(row: dict) -> dict:
     # 전체 지표 dict에서 핵심 필드만 추출해 요약 레코드 생성
     return {
@@ -102,6 +113,7 @@ def _to_summary_row(row: dict) -> dict:
         "llm_response": row["llm_response"],
         "key_metrics": _build_key_metrics(row),
         "streaming_info": _build_streaming_info(row),
+        "adaptive_control_info": _build_adaptive_info(row),
         "mos": {
             "utmos": round(row["utmos"], 3) if row["utmos"] is not None else None,
             "nisqa_mos": round(row["nisqa_mos"], 3) if row["nisqa_mos"] is not None else None,
@@ -140,6 +152,10 @@ def _merge(record: MetricRecord, client: ClientMetrics | None) -> dict:
         # 실험 2·3 전용 — 실험 1에서는 None
         "text_chunk_count": record.text_chunk_count,
         "audio_chunk_count": record.audio_chunk_count,
+        # 실험 3 전용 — 실험 1·2에서는 None
+        "avg_text_chunk_size": record.avg_text_chunk_size,
+        "avg_audio_chunk_size": record.avg_audio_chunk_size,
+        "starvation_adjustments": record.starvation_adjustments,
         "utmos": round(record.utmos, 3) if record.utmos is not None else None,
         "nisqa_mos": round(record.nisqa_mos, 3) if record.nisqa_mos is not None else None,
         "nisqa_noisiness": round(record.nisqa_noisiness, 3) if record.nisqa_noisiness is not None else None,
@@ -207,6 +223,33 @@ def export(
     ts = datetime.now(tz=timezone.utc)
     ts_str = ts.strftime("%Y%m%d_%H%M%S")
     exported_at = ts.isoformat()
+
+    # ------------------------------
+    # 실험 3 전용: 제어 히스토리 파일 (control_history)
+    # control_snapshots는 텍스트 청크 수에 비례해 크기가 커지므로 server 파일과 분리 저장
+    # ------------------------------
+    if experiment == "adaptive":
+        history_rows = [
+            {
+                "timestamp": rec.timestamp,
+                "snapshots": rec.control_snapshots or [],
+            }
+            for rec in records
+        ]
+        history_path = _build_output_path(experiment, "control_history", ts_str)
+        history_path.write_text(
+            json.dumps(
+                {
+                    "experiment": experiment,
+                    "exported_at": exported_at,
+                    "count": len(history_rows),
+                    "results": history_rows,
+                },
+                indent=2, ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        logger.info("제어 히스토리 저장 완료: %s (%d건)", history_path, len(history_rows))
 
     # ------------------------------
     # 전체 지표 파일 (server)
