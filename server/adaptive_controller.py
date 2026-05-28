@@ -32,6 +32,30 @@ _CHARS_PER_TOKEN_KO: float = 2.5
 
 
 # ========================================
+# 가중치 (통합 제어 — Step 6)
+# ========================================
+
+# 텍스트 청크 크기 결정 가중치: 합 = 1.0
+# score 높을수록 여유 있음 -> 큰 청크
+_TEXT_WEIGHTS: dict[str, float] = {
+    "llm_token_rate":     0.30,   # LLM 빠름 -> 작은 청크 선호 (역관계)
+    "tts_synthesis_rate": 0.30,   # TTS 빠름 -> 큰 청크 가능 (정관계)
+    "buffer_level":       0.25,   # 버퍼 여유 -> 큰 청크 가능 (정관계)
+    "latency":            0.10,   # 지연 낮음 -> 큰 청크 가능 (역관계)
+    "throughput":         0.05,   # 처리량 높음 -> 큰 청크 가능 (정관계)
+}
+
+# 오디오 청크 크기 결정 가중치: 합 = 1.0
+# TTS 합성 속도를 주요 요인으로, 버퍼/네트워크를 보조 요인으로 조합
+_AUDIO_WEIGHTS: dict[str, float] = {
+    "tts_synthesis_rate": 0.50,
+    "buffer_level":       0.30,
+    "latency":            0.10,
+    "throughput":         0.10,
+}
+
+
+# ========================================
 # TTS 속도 추적기
 # ========================================
 
@@ -120,6 +144,9 @@ class AdaptiveController:
         self._session_start: float = time.perf_counter()
         self._last_ws_send_ts: float = 0.0
         self._tts_tracker = _TtsRateTracker()
+        
+        # 마지막으로 처리한 starvation_count: 새로운 고갈 이벤트 감지
+        self._prev_starvation: int = 0
 
 
 
@@ -188,45 +215,121 @@ class AdaptiveController:
 
 
     # ========================================
+    # 정규화 함수 (Step 6)
+    # ========================================
+    # 각 모니터링 변수를 [0.0, 1.0]으로 정규화.
+    # score가 높을수록 "버퍼/네트워크 여유 있음" -> 큰 청크를 의미한다.
+
+    def _norm_llm_rate(self, rate: float) -> float:
+        """LLM 토큰 속도 → [0, 1]. 느릴수록 1.0 (큰 청크 선호, 역관계).
+        rate=0(초기) → 0.5 중립, rate=60 t/s → 0.0."""
+        if rate <= 0.0:
+            return 0.5
+        return 1.0 - _clamp(rate / 60.0, 0.0, 1.0)
+
+    def _norm_tts_rate(self, rate: float) -> float:
+        """TTS 합성 속도 → [0, 1]. 빠를수록 1.0 (큰 청크 가능, 정관계).
+        rate=0(초기) → 0.5 중립, rate=60000 B/s → 1.0."""
+        if rate <= 0.0:
+            return 0.5
+        return _clamp(rate / 60_000.0, 0.0, 1.0)
+
+    def _norm_buffer(self, level: int) -> float:
+        """버퍼 청크 수 → [0, 1]. 많을수록 1.0 (여유 있음, 정관계).
+        level=0 → 0.0(위험), level=10 이상 → 1.0."""
+        return _clamp(level / 10.0, 0.0, 1.0)
+
+    def _norm_latency(self, latency_ms: float) -> float:
+        """네트워크 지연 → [0, 1]. 낮을수록 1.0 (빠른 네트워크, 역관계).
+        0ms → 1.0, 200ms 이상 → 0.0."""
+        if latency_ms <= 0.0:
+            return 0.5
+        return max(0.0, 1.0 - latency_ms / 200.0)
+
+    def _norm_throughput(self, throughput_bps: float) -> float:
+        """처리량 → [0, 1]. 높을수록 1.0 (전송 용량 충분, 정관계).
+        throughput=0(초기) → 0.5 중립, 100 KB/s 이상 → 1.0."""
+        if throughput_bps <= 0.0:
+            return 0.5
+        return _clamp(throughput_bps / 100_000.0, 0.0, 1.0)
+
+
+
+    # ========================================
+    # 통합 제어 계산 (Step 6)
+    # ========================================
+
+    def _compute_text_chunk_size(self) -> int:
+        """가중치 기반 통합 텍스트 청크 크기 계산.
+
+        버퍼 고갈 신규 발생 시 MIN_TEXT_CHUNK 즉시 반환 (긴급 처리).
+        그 외에는 5개 요인을 정규화 후 가중합하여 [MIN, MAX] 선형 매핑한다.
+        """
+        s = self._state
+
+        # 신규 starvation 이벤트 감지 → 긴급 축소
+        if s.buffer_starvation_count > self._prev_starvation:
+            self._prev_starvation = s.buffer_starvation_count
+            logger.info(
+                "_compute_text_chunk_size: 버퍼 고갈 감지 (count=%d), MIN_TEXT_CHUNK 반환",
+                s.buffer_starvation_count,
+            )
+            return MIN_TEXT_CHUNK
+
+        score = (
+            _TEXT_WEIGHTS["llm_token_rate"]     * self._norm_llm_rate(s.llm_token_rate)  +
+            _TEXT_WEIGHTS["tts_synthesis_rate"] * self._norm_tts_rate(s.tts_synthesis_rate) +
+            _TEXT_WEIGHTS["buffer_level"]       * self._norm_buffer(s.buffer_level)       +
+            _TEXT_WEIGHTS["latency"]            * self._norm_latency(s.latency_ms)        +
+            _TEXT_WEIGHTS["throughput"]         * self._norm_throughput(s.throughput_bps)
+        )
+        size = MIN_TEXT_CHUNK + int(score * (MAX_TEXT_CHUNK - MIN_TEXT_CHUNK))
+        return int(_clamp(size, MIN_TEXT_CHUNK, MAX_TEXT_CHUNK))
+
+    def _compute_audio_chunk_size(self) -> int:
+        """가중치 기반 통합 오디오 청크 크기 계산.
+
+        현재 버퍼가 비어있는 위험 상태면 MIN_AUDIO_CHUNK로 긴급 축소.
+        그 외에는 TTS 속도(주), 버퍼/네트워크(보조)를 가중합하여 [MIN, MAX] 선형 매핑한다.
+        PCM 16-bit(2바이트) 경계로 정렬하여 샘플 잘림을 방지한다.
+        """
+        s = self._state
+
+        # 현재 버퍼 고갈 위험 상태 -> 긴급 축소 (starvation 이벤트와 독립적으로 실시간 확인)
+        if s.buffer_level == 0 and s.buffer_starvation_count > 0:
+            logger.info(
+                "_compute_audio_chunk_size: 버퍼 고갈 위험 (level=0), MIN_AUDIO_CHUNK 반환",
+            )
+            return (MIN_AUDIO_CHUNK // 2) * 2
+
+        score = (
+            _AUDIO_WEIGHTS["tts_synthesis_rate"] * self._norm_tts_rate(s.tts_synthesis_rate) +
+            _AUDIO_WEIGHTS["buffer_level"]       * self._norm_buffer(s.buffer_level)        +
+            _AUDIO_WEIGHTS["latency"]            * self._norm_latency(s.latency_ms)         +
+            _AUDIO_WEIGHTS["throughput"]         * self._norm_throughput(s.throughput_bps)
+        )
+        dynamic_size = MIN_AUDIO_CHUNK + int(score * (MAX_AUDIO_CHUNK - MIN_AUDIO_CHUNK))
+        size = int(_clamp(dynamic_size, MIN_AUDIO_CHUNK, MAX_AUDIO_CHUNK))
+        return (size // 2) * 2  # PCM 16-bit 경계 정렬
+
+
+
+    # ========================================
     # 제어 결정
     # ========================================
 
     def decide_text_chunk_size(self) -> int:
-        """LLM 토큰 속도(tokens/s) 기반으로 텍스트 청크 최대 문자 수를 동적 계산.
-
-        토큰이 빠를수록 작은 청크로 자주 전송해 TTS 응답을 앞당기고,
-        느릴수록 큰 청크로 TTS 큐 버퍼를 확보한다.
-        rate_factor = clamp(rate / 30.0, 0.5, 2.0) — 30 t/s를 기준(factor=1.0)으로 정규화.
-        """
-        rate = self._state.llm_token_rate
-        if rate <= 0.0:
-            # 초기 단계(토큰 2개 미만)는 기본값 유지
-            size = DEFAULT_TEXT_CHUNK_SIZE
-        else:
-            rate_factor = _clamp(rate / 30.0, 0.5, 2.0)
-            dynamic_size = DEFAULT_TEXT_CHUNK_SIZE / rate_factor
-            size = int(_clamp(dynamic_size, MIN_TEXT_CHUNK, MAX_TEXT_CHUNK))
+        """통합 제어 로직으로 텍스트 청크 최대 문자 수를 결정하여 반환."""
+        size = self._compute_text_chunk_size()
         self._state.text_chunk_size = size
+        logger.debug("decide_text_chunk_size: %d자", size)
         return size
 
     def decide_audio_chunk_size(self) -> int:
-        """TTS 합성 속도(bytes/s) 기반으로 오디오 청크 최대 bytes를 동적 계산.
-
-        빠른 합성 → 큰 청크로 전송 효율 향상,
-        느린 합성 → 작은 청크로 첫 오디오 수신 지연(TTFA) 단축.
-        rate_factor = clamp(rate / 30000.0, 0.5, 2.0) — 30000 B/s를 기준(factor=1.0)으로 정규화.
-        PCM 16-bit 경계(2바이트)로 정렬하여 샘플 잘림을 방지한다.
-        """
-        rate = self._state.tts_synthesis_rate
-        if rate <= 0.0:
-            size = DEFAULT_AUDIO_CHUNK_SIZE
-        else:
-            rate_factor = _clamp(rate / 30000.0, 0.5, 2.0)
-            dynamic_size = DEFAULT_AUDIO_CHUNK_SIZE * rate_factor
-            size = int(_clamp(dynamic_size, MIN_AUDIO_CHUNK, MAX_AUDIO_CHUNK))
-        # PCM 16-bit(2바이트) 경계 정렬
-        size = (size // 2) * 2
+        """통합 제어 로직으로 오디오 청크 최대 bytes를 결정하여 반환."""
+        size = self._compute_audio_chunk_size()
         self._state.audio_chunk_size = size
+        logger.debug("decide_audio_chunk_size: %d bytes", size)
         return size
 
 
