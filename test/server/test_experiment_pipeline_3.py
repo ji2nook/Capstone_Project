@@ -17,7 +17,7 @@ import sys
 sys.path.append(".")
 
 from server.experiment_pipeline import AdaptiveMetrics, run_adaptive
-from server.adaptive_controller import DEFAULT_AUDIO_CHUNK_SIZE, MIN_TEXT_CHUNK, MAX_TEXT_CHUNK
+from server.adaptive_controller import AdaptiveController, DEFAULT_AUDIO_CHUNK_SIZE, MIN_TEXT_CHUNK, MAX_TEXT_CHUNK
 from server import metrics_server
 
 
@@ -29,6 +29,7 @@ def _print_snapshot(snap: dict) -> None:
     print(f"  tts_synthesis_rate    : {snap.get('tts_synthesis_rate', 0.0):.1f} bytes/s")
     print(f"  buffer_level          : {snap.get('buffer_level')}")
     print(f"  buffer_starvation_cnt : {snap.get('buffer_starvation_count')}")
+    print(f"  latency_ms            : {snap.get('latency_ms', 0.0):.1f}ms")
     print(f"  throughput_bps        : {snap.get('throughput_bps', 0.0):.1f}")
     print(f"  last_send_interval_ms : {snap.get('last_send_interval_ms', 0.0):.1f}ms")
     print(f"  text_chunk_size       : {snap.get('text_chunk_size')} 자  (결정값)")
@@ -229,6 +230,32 @@ async def main() -> None:
     print(f"  ttfa             : {saved.ttfa:.1f}ms  ← Step 8 전: else 분기로 0.0 기록")
     print(f"  e2e_latency      : {saved.e2e_latency:.1f}ms")
     print("  저장 검증 통과")
+
+    # ------------------------------
+    # Step 7: NetworkSnapshot 초기값 주입 검증
+    # ------------------------------
+    from server.network_probe import NetworkSnapshot
+
+    # 파이프라인이 직접 run_adaptive() 호출로 컨트롤러를 내부 생성했으므로
+    # NetworkSnapshot 없이 시작 → 모든 스냅샷의 latency_ms는 0.0
+    for snap in m.control_snapshots:
+        assert snap.get("latency_ms") == 0.0
+
+    # 스냅샷 주입 시 latency_ms, throughput_bps가 올바르게 설정되는지 확인
+    snap_ok = NetworkSnapshot(timestamp=0, download_mbps=100.0, upload_mbps=50.0, ping_llm_ms=25.0, ping_tts_ms=30.0)
+    ctrl_with = AdaptiveController(network_snapshot=snap_ok)
+    assert ctrl_with._state.latency_ms == 25.0
+    assert ctrl_with._state.throughput_bps == 100.0 * 1e6 / 8
+
+    # 스냅샷 없으면 0.0 폴백
+    ctrl_without = AdaptiveController()
+    assert ctrl_without._state.latency_ms == 0.0
+    assert ctrl_without._state.throughput_bps == 0.0
+
+    print("===== Step 7: NetworkSnapshot 초기값 주입 검증 =====")
+    print(f"  스냅샷 있음 — latency={ctrl_with._state.latency_ms:.1f}ms, throughput={ctrl_with._state.throughput_bps:.0f} bps")
+    print(f"  스냅샷 없음 — latency={ctrl_without._state.latency_ms:.1f}ms, throughput={ctrl_without._state.throughput_bps:.0f} bps")
+    print("  검증 통과")
 
 
 asyncio.run(main())

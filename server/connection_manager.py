@@ -202,7 +202,8 @@ async def websocket_endpoint(
             elif experiment == "adaptive":
                 adaptive_metrics = None
                 audio_chunk_count = 0
-                controller = AdaptiveController()
+                # Step 7: 서버 시작 시 측정한 네트워크 스냅샷을 주입하여 콜드 스타트 편향 방지
+                controller = AdaptiveController(network_snapshot=_net_snapshot)
 
                 async for audio_chunk, metrics in experiment_pipeline.run_adaptive(prompt, controller):
                     if metrics is not None:

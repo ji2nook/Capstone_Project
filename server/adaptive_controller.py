@@ -5,6 +5,8 @@ import time
 from collections import deque
 from dataclasses import asdict, dataclass
 
+from server.network_probe import NetworkSnapshot
+
 logger = logging.getLogger(__name__)
 
 
@@ -139,7 +141,7 @@ class AdaptiveController:
     decide_*() 메서드로 다음 청크 크기를 결정한다.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, network_snapshot: NetworkSnapshot | None = None) -> None:
         self._state = AdaptiveState()
         self._session_start: float = time.perf_counter()
         self._last_ws_send_ts: float = 0.0
@@ -149,6 +151,20 @@ class AdaptiveController:
         self._prev_starvation: int = 0
         # 버퍼 고갈로 MIN_TEXT_CHUNK를 반환한 누적 횟수
         self._starvation_adjustments: int = 0
+
+        # Step 7: 서버 시작 시 측정한 NetworkSnapshot으로 초기값 주입.
+        # latency_ms, throughput_bps가 0.0이면 _norm_*()이 중립값(0.5)을 반환하므로
+        # 첫 번째 청크 결정이 네트워크 환경을 반영하지 못한다(콜드 스타트 편향).
+        # 초기값을 주입하면 세션 시작 직후부터 실제 네트워크 조건이 제어에 반영된다.
+        if network_snapshot is not None:
+            self._state.latency_ms = network_snapshot.ping_llm_ms or 0.0
+            # download_mbps(Mbps) → bytes/s 변환: Mbps * 1e6 / 8
+            self._state.throughput_bps = (network_snapshot.download_mbps or 0.0) * 1e6 / 8
+            logger.debug(
+                "AdaptiveController 초기값 주입 — latency=%.1fms, throughput=%.0f bps",
+                self._state.latency_ms,
+                self._state.throughput_bps,
+            )
 
 
 
