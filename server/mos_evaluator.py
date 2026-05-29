@@ -94,6 +94,7 @@ class MOSEvaluator:
             "deg": wav_path,   # 평가 대상 파일 경로
             "output_dir": None,
             "ms_channel": None,
+            "ms_max_segments": 3000,
         })
         df = model.predict()
         logger.debug("NISQA 출력 컬럼: %s", list(df.columns))
