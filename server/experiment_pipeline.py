@@ -24,6 +24,10 @@ _AUDIO_DIR = Path("results") / "audio"
 # exp3 적응형 파이프라인이 청크 크기를 축소해 딜레이를 줄이는 반응을 유도하기 위한 실험용 변수.
 _TTS_STRESS_MS_PER_CHAR: float = float(os.environ.get("TTS_STRESS_MS_PER_CHAR", "0"))
 
+# ElevenLabs API 동시 스트림 연결 상한.
+# 초과 시 API가 429/연결 거부를 반환하여 오디오 청크 0개가 되는 문제를 방지한다.
+_TTS_MAX_CONCURRENCY: int = int(os.environ.get("TTS_MAX_CONCURRENCY", "5"))
+
 logger = logging.getLogger(__name__)
 
 if _TTS_STRESS_MS_PER_CHAR > 0:
@@ -216,6 +220,7 @@ async def run_streaming(
     # pipeline: 텍스트 청크 순서대로 등록되는 "오디오 큐의 큐"
     # 원소: asyncio.Queue(오디오 청크 담당) | _DONE(텍스트 스트림 종료 신호)
     pipeline: asyncio.Queue = asyncio.Queue()
+    tts_sem = asyncio.Semaphore(_TTS_MAX_CONCURRENCY)
 
     logger.info("[Streaming] 파이프라인 시작 (max_text_chars=%d)", max_text_chars)
 
@@ -228,9 +233,10 @@ async def run_streaming(
         try:
             if _TTS_STRESS_MS_PER_CHAR > 0:
                 await asyncio.sleep(len(text_chunk) * _TTS_STRESS_MS_PER_CHAR / 1000)
-            raw_audio_stream = api_manager.synthesize_streaming_audio(text_chunk)
-            async for audio_chunk in streaming_controller.tts_audio_chunker(raw_audio_stream):
-                await audio_q.put(audio_chunk)
+            async with tts_sem:
+                raw_audio_stream = api_manager.synthesize_streaming_audio(text_chunk)
+                async for audio_chunk in streaming_controller.tts_audio_chunker(raw_audio_stream):
+                    await audio_q.put(audio_chunk)
         except Exception:
             logger.error("[Streaming] TTS worker 오류 (%d자)", len(text_chunk), exc_info=True)
         finally:
@@ -364,6 +370,7 @@ async def run_adaptive(
     control_snapshots: list[dict] = []
 
     pipeline: asyncio.Queue = asyncio.Queue()
+    tts_sem = asyncio.Semaphore(_TTS_MAX_CONCURRENCY)
 
     logger.info("[Adaptive] 파이프라인 시작")
 
@@ -394,14 +401,15 @@ async def run_adaptive(
         try:
             if _TTS_STRESS_MS_PER_CHAR > 0:
                 await asyncio.sleep(len(text_chunk) * _TTS_STRESS_MS_PER_CHAR / 1000)
-            raw_audio_stream = api_manager.synthesize_streaming_audio(text_chunk)
-            async for audio_chunk in streaming_controller.tts_audio_chunker(
-                raw_audio_stream,
-                max_chunk_bytes=audio_chunk_size,
-            ):
-                # TTS 오디오 수신 콜백: Step 5에서 tts_synthesis_rate 갱신에 활용
-                controller.on_tts_audio_received(len(audio_chunk))
-                await audio_q.put(audio_chunk)
+            async with tts_sem:
+                raw_audio_stream = api_manager.synthesize_streaming_audio(text_chunk)
+                async for audio_chunk in streaming_controller.tts_audio_chunker(
+                    raw_audio_stream,
+                    max_chunk_bytes=audio_chunk_size,
+                ):
+                    # TTS 오디오 수신 콜백: Step 5에서 tts_synthesis_rate 갱신에 활용
+                    controller.on_tts_audio_received(len(audio_chunk))
+                    await audio_q.put(audio_chunk)
         except Exception:
             logger.error("[Adaptive] TTS worker 오류 (%d자)", len(text_chunk), exc_info=True)
         finally:
