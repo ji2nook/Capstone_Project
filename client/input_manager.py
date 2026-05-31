@@ -24,7 +24,7 @@ console = Console()
 _EXIT_COMMANDS: frozenset[str] = frozenset({"q", "quit", "exit"})
 
 # 실험 전환 키워드 — Prompt 입력 창에서 입력하면 파이프라인 재선택 메뉴로 복귀
-_SWITCH_COMMANDS: frozenset[str] = frozenset({"/switch", "switch"})
+_SWITCH_COMMANDS: frozenset[str] = frozenset({"/switch", "switch", "s"})
 
 __all__ = [
     "InputManager",
@@ -169,7 +169,10 @@ class InputManager:
                     logger.info("[%s] stdin 닫힘 — 세션 종료", self._experiment)
                     break
 
-                if not text or text.lower() in _EXIT_COMMANDS:
+                if not text:
+                    continue
+
+                if text.lower() in _EXIT_COMMANDS:
                     logger.info("[%s] 종료 명령 — 세션 종료", self._experiment)
                     break
 
@@ -230,7 +233,10 @@ class InputManager:
                     logger.info("[streaming] stdin 닫힘 — 세션 종료")
                     break
 
-                if not text or text.lower() in _EXIT_COMMANDS:
+                if not text:
+                    continue
+
+                if text.lower() in _EXIT_COMMANDS:
                     logger.info("[streaming] 종료 명령 — 세션 종료")
                     break
 
