@@ -56,7 +56,7 @@ def _build_output_path(experiment: str, label: str, timestamp: str) -> Path:
 
 
 def _build_key_metrics(row: dict) -> dict:
-    # 병합된 지표 dict에서 핵심 성능 지표 6개를 산출
+    # 병합된 지표 dict에서 핵심 성능 지표를 산출
     ttfa_client = row["ttfa_client"]
     play_duration = row["play_duration"]
     stutter_duration = row["stutter_duration"]
@@ -71,6 +71,12 @@ def _build_key_metrics(row: dict) -> dict:
         if play_duration is not None and play_duration > 0 and stutter_duration is not None
         else None
     )
+    # ping RTT 기반 네트워크 오버헤드 추정값 — ICMP RTT로 근사하므로 참고용 수치
+    net_overhead_est = {
+        "llm_proc_est_ms": row.get("llm_proc_est_ms"),
+        "tts_proc_est_ms": row.get("tts_proc_est_ms"),
+        "ttft_proc_est_ms": row.get("ttft_proc_est_ms"),
+    }
     return {
         "ttft_ms": round(row["ttft"], 3),
         "ttfa_ms": round(ttfa_client, 3) if ttfa_client is not None else None,
@@ -78,6 +84,7 @@ def _build_key_metrics(row: dict) -> dict:
         "buffer_starvation_count": row["buffer_starvation"],
         "buffer_starvation_rate_pct": buffer_starvation_rate_pct,
         "buffer_starvation_duration_ms": round(stutter_duration, 3) if stutter_duration is not None else None,
+        "net_overhead_est": net_overhead_est,
     }
 
 
@@ -125,7 +132,12 @@ def _to_summary_row(row: dict) -> dict:
     }
 
 
-def _merge(record: MetricRecord, client: ClientMetrics | None) -> dict:
+def _merge(
+    record: MetricRecord,
+    client: ClientMetrics | None,
+    ping_llm_ms: float | None,
+    ping_tts_ms: float | None,
+) -> dict:
     # 서버 측 지표와 클라이언트 측 지표를 하나의 dict로 병합
     # 실험 1에서는 client 없이 호출 가능 (실험 2, 3에서 해당 지표 추가)
 
@@ -133,6 +145,10 @@ def _merge(record: MetricRecord, client: ClientMetrics | None) -> dict:
     play_duration = client.play_duration if client is not None else None
     buffer_starvation = client.buffer_starvation if client is not None else None
     stutter_duration = client.stutter_duration if client is not None else None
+
+    def _proc_est(latency: float, ping: float | None) -> float | None:
+        """ping RTT를 네트워크 오버헤드 추정값으로 사용해 순수 처리 시간 추정."""
+        return round(latency - ping, 3) if ping is not None else None
 
     return {
         "timestamp": record.timestamp,
@@ -149,6 +165,13 @@ def _merge(record: MetricRecord, client: ClientMetrics | None) -> dict:
         "buffer_starvation": buffer_starvation,
         "stutter_duration": stutter_duration,
         "audio_path": record.audio_path,
+        # ping RTT 기반 네트워크 오버헤드 추정값 (ICMP RTT로 근사, 참고용)
+        # llm_proc_est_ms = llm_latency - ping_llm_ms (LLM 순수 처리 시간 추정)
+        # tts_proc_est_ms = tts_latency - ping_tts_ms (TTS 순수 처리 시간 추정)
+        # ttft_proc_est_ms = ttft - ping_llm_ms       (첫 청크까지 순수 처리 시간 추정)
+        "llm_proc_est_ms": _proc_est(record.llm_latency, ping_llm_ms),
+        "tts_proc_est_ms": _proc_est(record.tts_latency, ping_tts_ms),
+        "ttft_proc_est_ms": _proc_est(record.ttft, ping_llm_ms),
         # 실험 2·3 전용 — 실험 1에서는 None
         "text_chunk_count": record.text_chunk_count,
         "audio_chunk_count": record.audio_chunk_count,
@@ -216,8 +239,10 @@ def export(
     else:
         logger.info("MOS 패키지 미설치 — MOS 평가 스킵 (tools/evaluate_mos.py로 별도 실행)")
 
-    # 서버 + 클라이언트 지표를 1:1로 병합
-    rows = [_merge(rec, cli) for rec, cli in zip(records, clients)]
+    # 서버 + 클라이언트 지표를 1:1로 병합 (ping RTT 기반 보정값 포함)
+    ping_llm_ms = network_snapshot.ping_llm_ms if network_snapshot is not None else None
+    ping_tts_ms = network_snapshot.ping_tts_ms if network_snapshot is not None else None
+    rows = [_merge(rec, cli, ping_llm_ms, ping_tts_ms) for rec, cli in zip(records, clients)]
 
     # 서버 파일과 요약 파일의 타임스탬프를 동일하게 고정
     ts = datetime.now(tz=timezone.utc)
