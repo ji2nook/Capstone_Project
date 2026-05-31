@@ -5,23 +5,10 @@ import time
 from collections import deque
 from dataclasses import asdict, dataclass
 
+from server import experiment_config as cfg
 from server.network_probe import NetworkSnapshot
 
 logger = logging.getLogger(__name__)
-
-
-
-# ========================================
-# 기본 제어 파라미터
-# ========================================
-
-# 실험 2 고정값과 동일하게 시작
-DEFAULT_TEXT_CHUNK_SIZE: int = 20
-DEFAULT_AUDIO_CHUNK_SIZE: int = 8192
-MIN_TEXT_CHUNK: int = 10
-MAX_TEXT_CHUNK: int = 60
-MIN_AUDIO_CHUNK: int = 4096
-MAX_AUDIO_CHUNK: int = 32768
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -31,30 +18,6 @@ def _clamp(value: float, lo: float, hi: float) -> float:
 
 # 텍스트 청크 간격 기반 rate 계산 시 chars → tokens 환산 상수 (한국어 기준)
 _CHARS_PER_TOKEN_KO: float = 2.5
-
-
-# ========================================
-# 가중치 (통합 제어 — Step 6)
-# ========================================
-
-# 텍스트 청크 크기 결정 가중치: 합 = 1.0
-# score 높을수록 여유 있음 -> 큰 청크
-_TEXT_WEIGHTS: dict[str, float] = {
-    "llm_token_rate":     0.30,   # LLM 빠름 -> 작은 청크 선호 (역관계)
-    "tts_synthesis_rate": 0.30,   # TTS 빠름 -> 큰 청크 가능 (정관계)
-    "buffer_level":       0.25,   # 버퍼 여유 -> 큰 청크 가능 (정관계)
-    "latency":            0.10,   # 지연 낮음 -> 큰 청크 가능 (역관계)
-    "throughput":         0.05,   # 처리량 높음 -> 큰 청크 가능 (정관계)
-}
-
-# 오디오 청크 크기 결정 가중치: 합 = 1.0
-# TTS 합성 속도를 주요 요인으로, 버퍼/네트워크를 보조 요인으로 조합
-_AUDIO_WEIGHTS: dict[str, float] = {
-    "tts_synthesis_rate": 0.50,
-    "buffer_level":       0.30,
-    "latency":            0.10,
-    "throughput":         0.10,
-}
 
 
 # ========================================
@@ -125,8 +88,8 @@ class AdaptiveState:
     # ----------------------------------------
     # 현재 제어 파라미터 (Step 4~7에서 동적 계산값으로 교체)
     # ----------------------------------------
-    text_chunk_size: int = DEFAULT_TEXT_CHUNK_SIZE    # decide_text_chunk_size() 호출 시 갱신
-    audio_chunk_size: int = DEFAULT_AUDIO_CHUNK_SIZE  # decide_audio_chunk_size() 호출 시 갱신
+    text_chunk_size: int = cfg.DEFAULT_TEXT_CHUNK_SIZE    # decide_text_chunk_size() 호출 시 갱신
+    audio_chunk_size: int = cfg.DEFAULT_AUDIO_CHUNK_SIZE  # decide_audio_chunk_size() 호출 시 갱신
 
 
 
@@ -149,7 +112,7 @@ class AdaptiveController:
 
         # 마지막으로 처리한 starvation_count: 새로운 고갈 이벤트 감지
         self._prev_starvation: int = 0
-        # 버퍼 고갈로 MIN_TEXT_CHUNK를 반환한 누적 횟수
+        # 버퍼 고갈로 cfg.MIN_TEXT_CHUNK를 반환한 누적 횟수
         self._starvation_adjustments: int = 0
 
         # Step 7: 서버 시작 시 측정한 NetworkSnapshot으로 초기값 주입.
@@ -285,7 +248,7 @@ class AdaptiveController:
     def _compute_text_chunk_size(self) -> int:
         """가중치 기반 통합 텍스트 청크 크기 계산.
 
-        버퍼 고갈 신규 발생 시 MIN_TEXT_CHUNK 즉시 반환 (긴급 처리).
+        버퍼 고갈 신규 발생 시 cfg.MIN_TEXT_CHUNK 즉시 반환 (긴급 처리).
         그 외에는 5개 요인을 정규화 후 가중합하여 [MIN, MAX] 선형 매핑한다.
         """
         s = self._state
@@ -295,25 +258,25 @@ class AdaptiveController:
             self._prev_starvation = s.buffer_starvation_count
             self._starvation_adjustments += 1
             logger.info(
-                "_compute_text_chunk_size: 버퍼 고갈 감지 (count=%d), MIN_TEXT_CHUNK 반환",
+                "_compute_text_chunk_size: 버퍼 고갈 감지 (count=%d), cfg.MIN_TEXT_CHUNK 반환",
                 s.buffer_starvation_count,
             )
-            return MIN_TEXT_CHUNK
+            return cfg.MIN_TEXT_CHUNK
 
         score = (
-            _TEXT_WEIGHTS["llm_token_rate"]     * self._norm_llm_rate(s.llm_token_rate)  +
-            _TEXT_WEIGHTS["tts_synthesis_rate"] * self._norm_tts_rate(s.tts_synthesis_rate) +
-            _TEXT_WEIGHTS["buffer_level"]       * self._norm_buffer(s.buffer_level)       +
-            _TEXT_WEIGHTS["latency"]            * self._norm_latency(s.latency_ms)        +
-            _TEXT_WEIGHTS["throughput"]         * self._norm_throughput(s.throughput_bps)
+            cfg.TEXT_WEIGHTS["llm_token_rate"]     * self._norm_llm_rate(s.llm_token_rate)  +
+            cfg.TEXT_WEIGHTS["tts_synthesis_rate"] * self._norm_tts_rate(s.tts_synthesis_rate) +
+            cfg.TEXT_WEIGHTS["buffer_level"]       * self._norm_buffer(s.buffer_level)       +
+            cfg.TEXT_WEIGHTS["latency"]            * self._norm_latency(s.latency_ms)        +
+            cfg.TEXT_WEIGHTS["throughput"]         * self._norm_throughput(s.throughput_bps)
         )
-        size = MIN_TEXT_CHUNK + int(score * (MAX_TEXT_CHUNK - MIN_TEXT_CHUNK))
-        return int(_clamp(size, MIN_TEXT_CHUNK, MAX_TEXT_CHUNK))
+        size = cfg.MIN_TEXT_CHUNK + int(score * (cfg.MAX_TEXT_CHUNK - cfg.MIN_TEXT_CHUNK))
+        return int(_clamp(size, cfg.MIN_TEXT_CHUNK, cfg.MAX_TEXT_CHUNK))
 
     def _compute_audio_chunk_size(self) -> int:
         """가중치 기반 통합 오디오 청크 크기 계산.
 
-        현재 버퍼가 비어있는 위험 상태면 MIN_AUDIO_CHUNK로 긴급 축소.
+        현재 버퍼가 비어있는 위험 상태면 cfg.MIN_AUDIO_CHUNK로 긴급 축소.
         그 외에는 TTS 속도(주), 버퍼/네트워크(보조)를 가중합하여 [MIN, MAX] 선형 매핑한다.
         PCM 16-bit(2바이트) 경계로 정렬하여 샘플 잘림을 방지한다.
         """
@@ -322,18 +285,18 @@ class AdaptiveController:
         # 현재 버퍼 고갈 위험 상태 -> 긴급 축소 (starvation 이벤트와 독립적으로 실시간 확인)
         if s.buffer_level == 0 and s.buffer_starvation_count > 0:
             logger.info(
-                "_compute_audio_chunk_size: 버퍼 고갈 위험 (level=0), MIN_AUDIO_CHUNK 반환",
+                "_compute_audio_chunk_size: 버퍼 고갈 위험 (level=0), cfg.MIN_AUDIO_CHUNK 반환",
             )
-            return (MIN_AUDIO_CHUNK // 2) * 2
+            return (cfg.MIN_AUDIO_CHUNK // 2) * 2
 
         score = (
-            _AUDIO_WEIGHTS["tts_synthesis_rate"] * self._norm_tts_rate(s.tts_synthesis_rate) +
-            _AUDIO_WEIGHTS["buffer_level"]       * self._norm_buffer(s.buffer_level)        +
-            _AUDIO_WEIGHTS["latency"]            * self._norm_latency(s.latency_ms)         +
-            _AUDIO_WEIGHTS["throughput"]         * self._norm_throughput(s.throughput_bps)
+            cfg.AUDIO_WEIGHTS["tts_synthesis_rate"] * self._norm_tts_rate(s.tts_synthesis_rate) +
+            cfg.AUDIO_WEIGHTS["buffer_level"]       * self._norm_buffer(s.buffer_level)        +
+            cfg.AUDIO_WEIGHTS["latency"]            * self._norm_latency(s.latency_ms)         +
+            cfg.AUDIO_WEIGHTS["throughput"]         * self._norm_throughput(s.throughput_bps)
         )
-        dynamic_size = MIN_AUDIO_CHUNK + int(score * (MAX_AUDIO_CHUNK - MIN_AUDIO_CHUNK))
-        size = int(_clamp(dynamic_size, MIN_AUDIO_CHUNK, MAX_AUDIO_CHUNK))
+        dynamic_size = cfg.MIN_AUDIO_CHUNK + int(score * (cfg.MAX_AUDIO_CHUNK - cfg.MIN_AUDIO_CHUNK))
+        size = int(_clamp(dynamic_size, cfg.MIN_AUDIO_CHUNK, cfg.MAX_AUDIO_CHUNK))
         return (size // 2) * 2  # PCM 16-bit 경계 정렬
 
 
@@ -364,7 +327,7 @@ class AdaptiveController:
 
     @property
     def starvation_adjustments(self) -> int:
-        """버퍼 고갈로 인해 MIN_TEXT_CHUNK를 긴급 반환한 누적 횟수."""
+        """버퍼 고갈로 인해 cfg.MIN_TEXT_CHUNK를 긴급 반환한 누적 횟수."""
         return self._starvation_adjustments
 
     def snapshot(self) -> dict:
