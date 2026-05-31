@@ -111,6 +111,10 @@ class MOSEvaluator:
     # 공개 인터페이스
     # ----------------------------------------
 
+    def preload(self) -> None:
+        """서버 시작 시 모델을 미리 메모리에 로드해 evaluate() 첫 호출의 로딩 지연을 제거한다."""
+        self._load_utmos()
+
     def evaluate(self, wav_path: str | Path) -> MOSScore:
         # UTMOS / NISQA를 독립적으로 평가 — 한쪽이 실패해도 나머지 결과는 보존
         wav_path = str(wav_path)

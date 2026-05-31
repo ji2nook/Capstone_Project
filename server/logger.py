@@ -17,7 +17,23 @@ try:
 except ImportError:
     _MOS_AVAILABLE = False
 
+# 서버 시작 시 init_mos_evaluator()로 초기화된 싱글턴 — export()에서 재사용
+_evaluator: "MOSEvaluator | None" = None
+
 logger = logging.getLogger(__name__)
+
+
+def init_mos_evaluator(nisqa_weights_path: str | Path = "weights/nisqa.tar") -> None:
+    """서버 시작 시 MOS 평가 모델을 미리 로드해 세션 종료 시점의 메모리 스파이크를 방지한다."""
+    global _evaluator
+    if not _MOS_AVAILABLE:
+        logger.info("MOS 패키지 미설치 — 모델 사전 로딩 스킵")
+        return
+    logger.info("MOS 평가 모델 사전 로딩 시작...")
+    _evaluator = MOSEvaluator(nisqa_weights_path)
+    _evaluator.preload()
+    logger.info("MOS 평가 모델 사전 로딩 완료")
+
 
 # 결과 파일이 저장될 디렉토리 (프로젝트 루트 기준)
 RESULTS_DIR = Path("results")
@@ -222,7 +238,7 @@ def export(
     # MOS 평가 — torch/soundfile이 설치된 환경(로컬)에서만 실행
     # VM에서는 _MOS_AVAILABLE=False이므로 스킵, MOS 필드는 None으로 유지
     if _MOS_AVAILABLE:
-        evaluator = MOSEvaluator()
+        evaluator = _evaluator or MOSEvaluator()
         for rec in records:
             if not rec.audio_path:
                 continue

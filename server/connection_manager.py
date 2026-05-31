@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _net_snapshot
+    # MOS 모델을 서버 시작 시 미리 로드 — 세션 종료 시점의 메모리 스파이크 방지
+    await asyncio.to_thread(result_logger.init_mos_evaluator)
     try:
         await api_manager.warmup()
     except Exception:
