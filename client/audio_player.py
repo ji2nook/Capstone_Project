@@ -158,11 +158,12 @@ class AudioPlayer:
         끊김 시간 = 벽시계 경과 시간 - 오디오 프레임 기반 재생 시간.
         네트워크 대기로 PyAudio 하드웨어 버퍼가 고갈된 시간을 반영한다.
         """
-        wall_ms = (time.perf_counter() - self._play_start) * 1000 if self._play_start > 0.0 else 0.0
         if self._stream is not None:
-            self._stream.stop_stream()
+            self._stream.stop_stream()  # 하드웨어 버퍼 drain 완료까지 블로킹
             self._stream.close()
             self._stream = None
+        # stop_stream() 이후에 측정해야 버퍼 잔량이 wall_ms에 포함됨
+        wall_ms = (time.perf_counter() - self._play_start) * 1000 if self._play_start > 0.0 else 0.0
         # PyAudio 버퍼 소진 후 루프백 녹음 중단 및 스레드 회수
         self._loopback_stop.set()
         if self._loopback_thread is not None:
