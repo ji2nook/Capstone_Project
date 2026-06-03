@@ -200,119 +200,68 @@ class AdaptiveController:
 
 
     # ========================================
-    # 정규화 함수 (Step 6)
-    # ========================================
-    # 각 모니터링 변수를 [0.0, 1.0]으로 정규화.
-    # score가 높을수록 "버퍼/네트워크 여유 있음" -> 큰 청크를 의미한다.
-
-    def _norm_llm_rate(self, rate: float) -> float:
-        """LLM 토큰 속도 → [0, 1]. 빠를수록 1.0 (큰 청크 가능, 정관계).
-        rate=0(초기) → 0.5 중립, rate=100 t/s → 1.0."""
-        if rate <= 0.0:
-            return 0.5
-        return _clamp(rate / 100.0, 0.0, 1.0)
-
-    def _norm_tts_rate(self, rate: float) -> float:
-        """TTS 합성 속도 → [0, 1]. 빠를수록 1.0 (큰 청크 가능, 정관계).
-        rate=0(초기) → 0.5 중립, 실측 범위(370K~1.3M B/s) 기준으로 1.3M B/s → 1.0."""
-        if rate <= 0.0:
-            return 0.5
-        return _clamp(rate / 1_300_000.0, 0.0, 1.0)
-
-    def _norm_buffer(self, level: int) -> float:
-        """버퍼 청크 수 → [0, 1]. 많을수록 1.0 (여유 있음, 정관계).
-        level=0 && starvation=0: 초기 상태로 보고 0.5 중립 반환.
-        level=0 && starvation>0: 0.0 (실제 고갈 위험)."""
-        if level == 0 and self._state.buffer_starvation_count == 0:
-            return 0.5
-        return _clamp(level / 10.0, 0.0, 1.0)
-
-    def _norm_latency_tts(self, latency_ms: float) -> float:
-        """TTS API 지연 → [0, 1]. 높을수록 1.0 (API 호출 배치 효율 선호, 정관계).
-        latency가 높을수록 TTS API 호출 횟수를 줄이기 위해 큰 텍스트 청크를 선호한다.
-        latency=0(초기) → 0.5 중립, 200ms 이상 → 1.0."""
-        if latency_ms <= 0.0:
-            return 0.5
-        return _clamp(latency_ms / 200.0, 0.0, 1.0)
-
-    def _norm_latency(self, latency_ms: float) -> float:
-        """클라이언트 딜리버리 지연 (proxy) → [0, 1]. 낮을수록 1.0 (역관계).
-        latency가 높을수록 청크가 늦게 도착하므로 작은 오디오 청크를 자주 보내야 한다.
-        latency=0(초기) → 0.5 중립, 200ms 이상 → 0.0."""
-        if latency_ms <= 0.0:
-            return 0.5
-        return max(0.0, 1.0 - latency_ms / 200.0)
-
-    def _norm_throughput(self, throughput_bps: float) -> float:
-        """처리량 → [0, 1]. 높을수록 1.0 (전송 용량 충분, 정관계).
-        throughput=0(초기) → 0.5 중립, 실험 대역폭 범위(200~1000 kbps) 기준으로 1 Mbps → 1.0."""
-        if throughput_bps <= 0.0:
-            return 0.5
-        return _clamp(throughput_bps / 125_000.0, 0.0, 1.0)
-
-
-
-    # ========================================
-    # 통합 제어 계산 (Step 6)
+    # ABR 구간 기반 제어 계산
     # ========================================
 
     def _compute_text_chunk_size(self) -> int:
-        """가중치 기반 통합 텍스트 청크 크기 계산.
+        """ABR 버퍼 수위 기반 텍스트 청크 크기 결정.
 
-        5개 요인을 정규화 후 가중합하여 [MIN, MAX] 선형 매핑한다.
-        버퍼 여유가 있을수록 큰 청크를 허용하고, 고갈 상태일수록 작은 청크로
-        TTS를 빨리 호출해 오디오 확보 시간을 단축한다.
+        버퍼 수위를 단일 제어 신호로 사용한다.
+        - 긴급 구간: TTS 호출당 오디오 최대 확보 → MAX_TEXT_CHUNK
+        - 안정 구간: 반응성 우선 → MIN_TEXT_CHUNK
+        - 중간 구간: 선형 보간
+        초기 상태(첫 TTS 호출 전)는 스트리밍 기준값을 사용해 TTFA를 보존한다.
         """
         s = self._state
 
-        # 신규 starvation 이벤트 횟수만 추적 (청크 크기 즉시 변경 없음)
         if s.buffer_starvation_count > self._prev_starvation:
             self._prev_starvation = s.buffer_starvation_count
             self._starvation_adjustments += 1
-            logger.info(
-                "_compute_text_chunk_size: 버퍼 고갈 감지 (count=%d)",
-                s.buffer_starvation_count,
-            )
+            logger.info("_compute_text_chunk_size: 버퍼 고갈 (count=%d)", s.buffer_starvation_count)
 
-        # 버퍼 여유(level=10) → buffer_score=1.0 → 큰 청크 가능
-        # 버퍼 고갈(level=0) → buffer_score=0.0 → 작은 청크 → TTS를 빨리 호출해 오디오 확보
-        buffer_score = self._norm_buffer(s.buffer_level)
+        level = s.buffer_level
 
-        score = (
-            cfg.TEXT_WEIGHTS["llm_token_rate"]     * self._norm_llm_rate(s.llm_token_rate)      +
-            cfg.TEXT_WEIGHTS["tts_synthesis_rate"] * self._norm_tts_rate(s.tts_synthesis_rate)  +
-            cfg.TEXT_WEIGHTS["buffer_level"]       * buffer_score                                +
-            cfg.TEXT_WEIGHTS["latency"]            * self._norm_latency_tts(s.tts_latency_ms)  +
-            cfg.TEXT_WEIGHTS["throughput"]         * self._norm_throughput(s.throughput_bps)
-        )
-        size = cfg.MIN_TEXT_CHUNK + int(score * (cfg.MAX_TEXT_CHUNK - cfg.MIN_TEXT_CHUNK))
+        # 초기 상태: 아직 TTS 호출이 없었으면 스트리밍 기준값으로 TTFA 보존
+        if s.tts_last_send_ts == 0.0:
+            return cfg.DEFAULT_TEXT_CHUNK_SIZE
+
+        # 긴급 구간: TTS 호출당 오디오 최대 확보 (버퍼 빠르게 복구)
+        if level <= cfg.BUFFER_CRITICAL:
+            return cfg.MAX_TEXT_CHUNK
+
+        # 안정 구간: 버퍼 여유 있으므로 반응성 우선
+        if level >= cfg.BUFFER_STABLE:
+            return cfg.MIN_TEXT_CHUNK
+
+        # 중간 구간: 수위 상승 → 청크 크기 MAX에서 MIN으로 선형 감소
+        ratio = (level - cfg.BUFFER_CRITICAL) / (cfg.BUFFER_STABLE - cfg.BUFFER_CRITICAL)
+        size = cfg.MAX_TEXT_CHUNK - int(ratio * (cfg.MAX_TEXT_CHUNK - cfg.MIN_TEXT_CHUNK))
         return int(_clamp(size, cfg.MIN_TEXT_CHUNK, cfg.MAX_TEXT_CHUNK))
 
     def _compute_audio_chunk_size(self) -> int:
-        """가중치 기반 통합 오디오 청크 크기 계산.
+        """ABR 버퍼 수위 기반 오디오 청크 크기 결정.
 
-        현재 버퍼가 비어있는 위험 상태면 cfg.MIN_AUDIO_CHUNK로 긴급 축소.
-        그 외에는 TTS 속도(주), 버퍼/네트워크(보조)를 가중합하여 [MIN, MAX] 선형 매핑한다.
+        버퍼 수위를 단일 제어 신호로 사용한다.
+        - 긴급 구간: 클라이언트에 빠른 전달 → MIN_AUDIO_CHUNK
+        - 안정 구간: 전송 효율 우선 → MAX_AUDIO_CHUNK
+        - 중간 구간: 선형 보간
         PCM 16-bit(2바이트) 경계로 정렬하여 샘플 잘림을 방지한다.
         """
         s = self._state
+        level = s.buffer_level
 
-        # 현재 버퍼 고갈 위험 상태 -> 긴급 축소 (starvation 이벤트와 독립적으로 실시간 확인)
-        if s.buffer_level == 0 and s.buffer_starvation_count > 0:
-            logger.info(
-                "_compute_audio_chunk_size: 버퍼 고갈 위험 (level=0), cfg.MIN_AUDIO_CHUNK 반환",
-            )
+        # 긴급 구간: 작은 청크로 클라이언트 버퍼를 빠르게 채움
+        if level <= cfg.BUFFER_CRITICAL:
             return (cfg.MIN_AUDIO_CHUNK // 2) * 2
 
-        score = (
-            cfg.AUDIO_WEIGHTS["tts_synthesis_rate"] * self._norm_tts_rate(s.tts_synthesis_rate) +
-            cfg.AUDIO_WEIGHTS["buffer_level"]       * self._norm_buffer(s.buffer_level)        +
-            cfg.AUDIO_WEIGHTS["latency"]            * self._norm_latency(s.latency_ms)         +
-            cfg.AUDIO_WEIGHTS["throughput"]         * self._norm_throughput(s.throughput_bps)
-        )
-        dynamic_size = cfg.MIN_AUDIO_CHUNK + int(score * (cfg.MAX_AUDIO_CHUNK - cfg.MIN_AUDIO_CHUNK))
-        size = int(_clamp(dynamic_size, cfg.MIN_AUDIO_CHUNK, cfg.MAX_AUDIO_CHUNK))
-        return (size // 2) * 2  # PCM 16-bit 경계 정렬
+        # 안정 구간: 큰 청크로 전송 효율 극대화
+        if level >= cfg.BUFFER_STABLE:
+            return (cfg.MAX_AUDIO_CHUNK // 2) * 2
+
+        # 중간 구간: 수위 상승 → 청크 크기 MIN에서 MAX로 선형 증가
+        ratio = (level - cfg.BUFFER_CRITICAL) / (cfg.BUFFER_STABLE - cfg.BUFFER_CRITICAL)
+        size = cfg.MIN_AUDIO_CHUNK + int(ratio * (cfg.MAX_AUDIO_CHUNK - cfg.MIN_AUDIO_CHUNK))
+        return (size // 2) * 2
 
 
 

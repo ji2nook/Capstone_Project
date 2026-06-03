@@ -16,31 +16,20 @@ AUDIO_CHUNK_SIZE: int = 12000    # TTS 오디오 청크 크기 (bytes, 세션 �
 DEFAULT_TEXT_CHUNK_SIZE: int = 80
 DEFAULT_AUDIO_CHUNK_SIZE: int = 12000
 
-MIN_TEXT_CHUNK: int = 80
+MIN_TEXT_CHUNK: int = 40
 MAX_TEXT_CHUNK: int = 200
 MIN_AUDIO_CHUNK: int = 12000
 MAX_AUDIO_CHUNK: int = 24000
 
 
 # ========================================
-# 실험 3 — 지표 가중치
+# 실험 3 — ABR 버퍼 임계값
 # ========================================
 
-# 텍스트 청크 크기 결정 가중치; 합 = 1.0
-# 종합 점수가 높을수록 여유 있음 → 큰 청크 크기
-TEXT_WEIGHTS: dict[str, float] = {
-    "llm_token_rate":     0.20,   # LLM 빠름 -> 큰 청크 가능 / 느림 -> 작은 청크로 TTS 빠른 호출 (정관계)
-    "tts_synthesis_rate": 0.25,   # TTS 빠름 -> 큰 청크 가능 (정관계)
-    "buffer_level":       0.30,   # 버퍼 여유 -> 큰 청크 허용 / 버퍼 고갈 -> 작은 청크로 TTS 빠른 호출 (정관계)
-    "latency":            0.15,   # TTS API 지연 높음 -> 큰 청크로 호출 횟수 최소화 (정관계)
-    "throughput":         0.10,   # 처리량 높음 -> 큰 청크 가능 (정관계)
-}
-
-# 오디오 청크 크기 결정 가중치; 합 = 1.0
-# 버퍼 상태가 주요 요인, TTS 속도·네트워크는 보조 요인
-AUDIO_WEIGHTS: dict[str, float] = {
-    "tts_synthesis_rate": 0.30,
-    "buffer_level":       0.40,
-    "latency":            0.20,   # 클라이언트 딜리버리 지연 높음 -> 작은 청크를 자주 (역관계)
-    "throughput":         0.10,
-}
+# 버퍼 수위(청크 수)에 따른 구간 경계
+# 긴급 구간 (이하): 텍스트 최대 청크 → TTS 호출당 오디오 최대 확보
+#                   오디오 최소 청크 → 클라이언트에 빠르게 전달
+# 안정 구간 (이상): 텍스트 최소 청크 → 반응성 우선
+#                   오디오 최대 청크 → 전송 효율 우선
+BUFFER_CRITICAL: int = 2
+BUFFER_STABLE:   int = 8
