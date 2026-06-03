@@ -31,7 +31,8 @@ class MetricRecord:
     e2e_latency: float       # 서버 측 E2E Latency (ms)
     ttft: float              # Time To First Token (ms)
     ttfa: float              # Time To First Audio (ms)
-    audio_path: str          # MOS 평가용 WAV 파일 경로
+    audio_path: str          # 서버 측 TTS WAV 경로 (음질 평가용)
+    as_heard_path: str = "" # 클라이언트 as-heard WAV 경로 (체감 품질 평가용)
     # 실험 2·3 전용 (실험 1에서는 None)
     text_chunk_count: int | None = None      # llm_text_chunker가 생성한 텍스트 청크 수
     audio_chunk_count: int | None = None     # tts_audio_chunker가 생성한 오디오 청크 수
@@ -152,6 +153,12 @@ def get_records() -> list[MetricRecord]:
 def clear() -> None:
     _records.clear()
     logger.debug("성능 지표 초기화 완료")
+
+
+def set_last_as_heard_path(path: str) -> None:
+    """가장 최근 레코드의 as_heard_path를 갱신한다."""
+    if _records:
+        _records[-1].as_heard_path = path
 
 
 # 앞에서 n개만 제거 — export() 완료 후 스냅샷에 포함된 레코드만 삭제할 때 사용

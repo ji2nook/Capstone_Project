@@ -4,7 +4,10 @@ import asyncio
 import json
 import logging
 import os
+import wave
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 
@@ -89,6 +92,21 @@ class ConnectionManager:
         # 클라이언트는 len(data) == 0 조건으로 종료를 감지
         await websocket.send_bytes(b"")
         logger.info("스트리밍 종료 신호 전송 완료")
+
+def _save_as_heard_wav(pcm_bytes: bytes, experiment: str) -> str:
+    """클라이언트로부터 수신한 as-heard PCM을 WAV로 저장하고 경로를 반환한다."""
+    prefix = {"sequential": "exp1", "streaming": "exp2", "adaptive": "exp3"}.get(experiment, experiment)
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    path = Path("results") / f"{prefix}_as_heard_{ts}.wav"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(24000)
+        wf.writeframes(pcm_bytes)
+    logger.info("as-heard WAV 저장: %s (%d bytes)", path, len(pcm_bytes))
+    return str(path)
+
 
 # 모듈 수준 싱글턴: main.py와 엔드포인트 핸들러가 동일 인스턴스 공유
 manager = ConnectionManager()
@@ -187,6 +205,15 @@ async def websocket_endpoint(
                         audio_path=streaming_metrics.audio_path,
                     )
 
+                # 클라이언트가 역전송한 as-heard PCM 수신 → WAV 저장 → MOS 평가 대상으로 등록
+                try:
+                    as_heard_pcm = await asyncio.wait_for(websocket.receive_bytes(), timeout=60.0)
+                    if as_heard_pcm:
+                        as_heard_path = _save_as_heard_wav(as_heard_pcm, "streaming")
+                        metrics_server.set_last_as_heard_path(as_heard_path)
+                except Exception:
+                    logger.warning("[streaming] as-heard PCM 수신 실패 — MOS는 서버 TTS 파일로 평가됩니다")
+
                 # 오디오 전송 후 클라이언트가 역전송한 지표 JSON을 수신
                 try:
                     raw = await websocket.receive_text()
@@ -249,6 +276,15 @@ async def websocket_endpoint(
                         llm_response=adaptive_metrics.llm_response,
                         audio_path=adaptive_metrics.audio_path,
                     )
+
+                # 클라이언트가 역전송한 as-heard PCM 수신 → WAV 저장 → MOS 평가 대상으로 등록
+                try:
+                    as_heard_pcm = await asyncio.wait_for(websocket.receive_bytes(), timeout=60.0)
+                    if as_heard_pcm:
+                        as_heard_path = _save_as_heard_wav(as_heard_pcm, "adaptive")
+                        metrics_server.set_last_as_heard_path(as_heard_path)
+                except Exception:
+                    logger.warning("[adaptive] as-heard PCM 수신 실패 — MOS는 서버 TTS 파일로 평가됩니다")
 
                 # 최종 클라이언트 지표 수신: _ws_reader가 이미 큐에 적재했을 수 있으므로 비블로킹 우선
                 # timeout: 클라이언트가 오디오 재생 완료 후 역전송하므로 재생 시간만큼 여유를 줌

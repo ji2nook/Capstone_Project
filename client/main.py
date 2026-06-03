@@ -271,7 +271,7 @@ async def main() -> None:
                             as_heard = audio_player.get_as_heard_bytes()
                             play_duration, stutter_duration = audio_player.close_stream()
 
-                            # 무음 포함 as-heard WAV 저장 — MOS 오프라인 평가용
+                            # 무음 포함 as-heard WAV 로컬 저장 (로컬 백업용)
                             as_heard_path = _save_as_heard_wav(as_heard, experiment, cycle_index)
                             cycle_index += 1
 
@@ -287,6 +287,9 @@ async def main() -> None:
                             buffer_starvation = jitter_buffer.starvation_count
 
                             metrics.record(result, play_duration, buffer_starvation, stutter_duration)
+
+                            # as-heard PCM을 서버로 전송 (서버에서 WAV 저장 후 MOS 평가)
+                            await input_manager.send_as_heard_pcm(as_heard)
 
                             await input_manager.send_client_metrics({
                                 "ttfa_client": (result.t_recv - result.t_send) * 1000,
@@ -366,6 +369,9 @@ async def main() -> None:
                             buffer_starvation = jitter_buffer.starvation_count
 
                             metrics.record(result, play_duration, buffer_starvation, stutter_duration)
+
+                            # as-heard PCM을 서버로 전송 (서버에서 WAV 저장 후 MOS 평가)
+                            await input_manager.send_as_heard_pcm(as_heard)
 
                             await input_manager.send_client_metrics({
                                 "ttfa_client": (result.t_recv - result.t_send) * 1000,
