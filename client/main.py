@@ -189,7 +189,7 @@ async def main() -> None:
 
         input_manager = InputManager(experiment=experiment)
         metrics = MetricsClient()
-        jitter_buffer = JitterBuffer()
+        jitter_buffer = JitterBuffer(min_buffer_chunks=5)
         should_switch = False
 
         with AudioPlayer() as audio_player:
