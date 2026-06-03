@@ -293,7 +293,6 @@ async def main() -> None:
                                 "play_duration": play_duration,
                                 "buffer_starvation": buffer_starvation,
                                 "stutter_duration": stutter_duration,
-                                "as_heard_path": str(as_heard_path),
                             })
 
                             _print_result(
@@ -373,7 +372,6 @@ async def main() -> None:
                                 "play_duration": play_duration,
                                 "buffer_starvation": buffer_starvation,
                                 "stutter_duration": stutter_duration,
-                                "as_heard_path": str(as_heard_path),
                             })
 
                             _print_result(

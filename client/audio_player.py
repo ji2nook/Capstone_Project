@@ -72,8 +72,9 @@ class AudioPlayer:
         )
         self._play_start = time.perf_counter()
         self._total_frames = 0
-        self._audio_cursor_s: float = 0.0   # 누적 오디오 시간 (초)
+        self._audio_cursor_s: float = 0.0        # 누적 오디오 시간 (초)
         self._as_heard: bytearray = bytearray()  # 무음 포함 재구성 오디오
+        self._first_chunk_time: float | None = None  # 첫 청크 수신 시각
         logger.info("스트리밍 스트림 오픈")
 
     def feed_chunk(self, chunk: bytes) -> None:
@@ -82,14 +83,21 @@ class AudioPlayer:
             logger.warning("feed_chunk 호출: 스트림이 열려 있지 않음")
             return
 
-        # 현재 오디오 커서보다 벽시계가 앞서 있으면 그 차이만큼 무음 삽입
-        # → 네트워크 대기로 PyAudio 하드웨어 버퍼가 비어 있던 구간을 재현
-        wall_elapsed_s = time.perf_counter() - self._play_start
-        gap_s = wall_elapsed_s - self._audio_cursor_s
-        if gap_s > 0.005:  # 5ms 미만은 부동소수점 오차로 간주해 무시
-            silence_samples = int(gap_s * _SAMPLE_RATE)
-            self._as_heard.extend(b"\x00" * silence_samples * 2)
-            self._audio_cursor_s += gap_s
+        now = time.perf_counter()
+
+        if self._first_chunk_time is None:
+            # 첫 번째 청크: 기준 시각 설정만 하고 gap 없음
+            # TTFA 대기 시간은 끊김이 아니므로 무음 삽입 제외
+            self._first_chunk_time = now
+        else:
+            # 이후 청크: 첫 청크 기준 벽시계와 누적 오디오 시간 비교
+            # 차이만큼이 실제 네트워크 대기(끊김) 구간
+            wall_elapsed_s = now - self._first_chunk_time
+            gap_s = wall_elapsed_s - self._audio_cursor_s
+            if gap_s > 0.005:  # 5ms 미만은 부동소수점 오차로 간주해 무시
+                silence_samples = int(gap_s * _SAMPLE_RATE)
+                self._as_heard.extend(b"\x00" * silence_samples * 2)
+                self._audio_cursor_s += gap_s
 
         self._stream.write(chunk)
         self._as_heard.extend(chunk)
