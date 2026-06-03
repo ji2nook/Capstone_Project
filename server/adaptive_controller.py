@@ -116,6 +116,9 @@ class AdaptiveController:
         self._prev_starvation: int = 0
         # 버퍼 고갈 이벤트 누적 횟수
         self._starvation_adjustments: int = 0
+        # 클라이언트 버퍼에 실제로 청크가 쌓인 적 있는지 여부
+        # False인 동안은 피드백이 불충분하므로 DEFAULT 유지
+        self._feedback_received: bool = False
 
         # Step 7: 서버 시작 시 측정한 NetworkSnapshot으로 초기값 주입.
         # latency_ms, throughput_bps가 0.0이면 _norm_*()이 중립값(0.5)을 반환하므로
@@ -191,6 +194,8 @@ class AdaptiveController:
         """클라이언트 버퍼 피드백 수신 후 호출. buffer_level 및 starvation_count 갱신."""
         self._state.buffer_level = buffer_level
         self._state.buffer_starvation_count = starvation_count
+        if buffer_level > 0:
+            self._feedback_received = True
         logger.debug(
             "on_client_feedback: buffer=%d, starvation=%d",
             buffer_level,
@@ -221,8 +226,11 @@ class AdaptiveController:
 
         level = s.buffer_level
 
-        # 초기 상태: 아직 TTS 호출이 없었으면 스트리밍 기준값으로 TTFA 보존
-        if s.tts_last_send_ts == 0.0:
+        # 피드백 미수신 구간: 클라이언트 버퍼에 청크가 한 번도 쌓이지 않았으면
+        # buffer_level 신호가 신뢰할 수 없으므로 스트리밍 기준값을 유지
+        # (짧은 응답에서는 텍스트 청크 결정이 오디오 재생 시작 전에 끝나므로
+        #  이 조건이 해제되지 않을 수 있음 → streaming과 동일한 DEFAULT 동작)
+        if s.tts_last_send_ts == 0.0 or not self._feedback_received:
             return cfg.DEFAULT_TEXT_CHUNK_SIZE
 
         # 긴급 구간: TTS를 빠르게 호출해 오디오를 조기 확보 → MIN_TEXT_CHUNK
