@@ -32,7 +32,7 @@ TEXT_WEIGHTS: dict[str, float] = {
     "llm_token_rate":     0.20,   # LLM 빠름 -> 작은 청크 선호 (역관계)
     "tts_synthesis_rate": 0.25,   # TTS 빠름 -> 큰 청크 가능 (정관계)
     "buffer_level":       0.30,   # 버퍼 여유 -> 큰 청크 가능 (정관계)
-    "latency":            0.15,   # 지연 낮음 -> 큰 청크 가능 (역관계)
+    "latency":            0.15,   # TTS API 지연 높음 -> 큰 청크로 호출 횟수 최소화 (정관계)
     "throughput":         0.10,   # 처리량 높음 -> 큰 청크 가능 (정관계)
 }
 
@@ -41,6 +41,6 @@ TEXT_WEIGHTS: dict[str, float] = {
 AUDIO_WEIGHTS: dict[str, float] = {
     "tts_synthesis_rate": 0.30,
     "buffer_level":       0.40,
-    "latency":            0.20,
+    "latency":            0.20,   # 클라이언트 딜리버리 지연 높음 -> 작은 청크를 자주 (역관계)
     "throughput":         0.10,
 }

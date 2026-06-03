@@ -80,8 +80,10 @@ class AdaptiveState:
     # ----------------------------------------
     # 네트워크
     # ----------------------------------------
-    # latency_ms: NetworkSnapshot 초기값 주입은 Step 7에서 구현
+    # latency_ms: ping_llm_ms 기반 — 오디오 클라이언트 딜리버리 지연 proxy (AUDIO_WEIGHTS)
     latency_ms: float = 0.0
+    # tts_latency_ms: ping_tts_ms 기반 — TTS API 호출 효율성 기준 (TEXT_WEIGHTS)
+    tts_latency_ms: float = 0.0
     throughput_bps: float = 0.0        # 최근 전송 처리량 (bytes/s)
     last_send_interval_ms: float = 0.0 # 직전 오디오 청크 전송 간격 (ms)
 
@@ -121,11 +123,13 @@ class AdaptiveController:
         # 초기값을 주입하면 세션 시작 직후부터 실제 네트워크 조건이 제어에 반영된다.
         if network_snapshot is not None:
             self._state.latency_ms = network_snapshot.ping_llm_ms or 0.0
+            self._state.tts_latency_ms = network_snapshot.ping_tts_ms or 0.0
             # download_mbps(Mbps) → bytes/s 변환: Mbps * 1e6 / 8
             self._state.throughput_bps = (network_snapshot.download_mbps or 0.0) * 1e6 / 8
             logger.debug(
-                "AdaptiveController 초기값 주입 — latency=%.1fms, throughput=%.0f bps",
+                "AdaptiveController 초기값 주입 — llm_latency=%.1fms, tts_latency=%.1fms, throughput=%.0f bps",
                 self._state.latency_ms,
+                self._state.tts_latency_ms,
                 self._state.throughput_bps,
             )
 
@@ -224,8 +228,17 @@ class AdaptiveController:
             return 0.5
         return _clamp(level / 10.0, 0.0, 1.0)
 
+    def _norm_latency_tts(self, latency_ms: float) -> float:
+        """TTS API 지연 → [0, 1]. 높을수록 1.0 (API 호출 배치 효율 선호, 정관계).
+        latency가 높을수록 TTS API 호출 횟수를 줄이기 위해 큰 텍스트 청크를 선호한다.
+        0ms → 0.0, 200ms 이상 → 1.0."""
+        if latency_ms <= 0.0:
+            return 0.5
+        return _clamp(latency_ms / 200.0, 0.0, 1.0)
+
     def _norm_latency(self, latency_ms: float) -> float:
-        """네트워크 지연 → [0, 1]. 낮을수록 1.0 (빠른 네트워크, 역관계).
+        """클라이언트 딜리버리 지연 (proxy) → [0, 1]. 낮을수록 1.0 (역관계).
+        latency가 높을수록 청크가 늦게 도착하므로 작은 오디오 청크를 자주 보내야 한다.
         0ms → 1.0, 200ms 이상 → 0.0."""
         if latency_ms <= 0.0:
             return 0.5
@@ -264,10 +277,10 @@ class AdaptiveController:
             return cfg.MIN_TEXT_CHUNK
 
         score = (
-            cfg.TEXT_WEIGHTS["llm_token_rate"]     * self._norm_llm_rate(s.llm_token_rate)  +
-            cfg.TEXT_WEIGHTS["tts_synthesis_rate"] * self._norm_tts_rate(s.tts_synthesis_rate) +
-            cfg.TEXT_WEIGHTS["buffer_level"]       * self._norm_buffer(s.buffer_level)       +
-            cfg.TEXT_WEIGHTS["latency"]            * self._norm_latency(s.latency_ms)        +
+            cfg.TEXT_WEIGHTS["llm_token_rate"]     * self._norm_llm_rate(s.llm_token_rate)      +
+            cfg.TEXT_WEIGHTS["tts_synthesis_rate"] * self._norm_tts_rate(s.tts_synthesis_rate)  +
+            cfg.TEXT_WEIGHTS["buffer_level"]       * self._norm_buffer(s.buffer_level)          +
+            cfg.TEXT_WEIGHTS["latency"]            * self._norm_latency_tts(s.tts_latency_ms)  +
             cfg.TEXT_WEIGHTS["throughput"]         * self._norm_throughput(s.throughput_bps)
         )
         size = cfg.MIN_TEXT_CHUNK + int(score * (cfg.MAX_TEXT_CHUNK - cfg.MIN_TEXT_CHUNK))
