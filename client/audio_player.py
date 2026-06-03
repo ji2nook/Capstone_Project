@@ -1,9 +1,17 @@
 # 오디오 재생
 
 import logging
+import threading
 import time
 
 import pyaudio
+
+try:
+    import numpy as np
+    import soundcard as sc
+    _LOOPBACK_AVAILABLE = True
+except ImportError:
+    _LOOPBACK_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +30,17 @@ __all__ = ["AudioPlayer"]
 class AudioPlayer:
     # PCM 오디오 재생
     # 컨텍스트 매니저로 사용 권장
-    
+
     def __init__(self) -> None:
         self._pa = pyaudio.PyAudio()
         # 스트리밍 재생 상태 (open_stream / feed_chunk / close_stream 주기 동안 유지)
         self._stream: pyaudio.Stream | None = None
         self._play_start: float = 0.0
         self._total_frames: int = 0
+        # WASAPI 루프백 녹음 상태
+        self._loopback_frames: list = []
+        self._loopback_stop: threading.Event = threading.Event()
+        self._loopback_thread: threading.Thread | None = None
 
     def play(self, audio_bytes: bytes) -> float:
         # 전체 오디오를 재생하고 재생 시간(ms)을 반환
@@ -55,14 +67,14 @@ class AudioPlayer:
         logger.info("재생 완료 — %.1fms", play_duration)
 
         return play_duration
-    
+
 
     # ----------------------------------------
     # 스트리밍 재생 (실험 2·3)
     # ----------------------------------------
 
     def open_stream(self) -> None:
-        # 스트리밍 재생용 PyAudio 스트림을 열고 내부 카운터를 초기화
+        # 스트리밍 재생용 PyAudio 스트림을 열고 WASAPI 루프백 녹음을 동시에 시작
         self._stream = self._pa.open(
             format=pyaudio.paInt16,
             channels=_CHANNELS,
@@ -72,7 +84,30 @@ class AudioPlayer:
         )
         self._play_start = time.perf_counter()
         self._total_frames = 0
+        self._loopback_frames = []
+        self._loopback_stop = threading.Event()
+        if _LOOPBACK_AVAILABLE:
+            self._loopback_thread = threading.Thread(
+                target=self._record_loopback, daemon=True
+            )
+            self._loopback_thread.start()
+        else:
+            self._loopback_thread = None
+            logger.warning("soundcard 미설치 — 루프백 녹음 불가 (as-heard MOS 평가 불가)")
         logger.info("스트리밍 스트림 오픈")
+
+    def _record_loopback(self) -> None:
+        # WASAPI 루프백으로 시스템 오디오 출력을 캡처 — PyAudio 재생과 병렬로 실행
+        # 마이크 불사용: 스피커로 출력되는 디지털 신호를 소프트웨어 수준에서 가로챔
+        try:
+            speaker = sc.default_speaker()
+            loopback_mic = sc.get_microphone(speaker.name, include_loopback=True)
+            with loopback_mic.recorder(samplerate=_SAMPLE_RATE, channels=_CHANNELS) as rec:
+                while not self._loopback_stop.is_set():
+                    data = rec.record(numframes=_CHUNK_SIZE)  # float32 ndarray (N, 1)
+                    self._loopback_frames.append(data)
+        except Exception as exc:
+            logger.warning("루프백 녹음 실패: %s", exc)
 
     def feed_chunk(self, chunk: bytes) -> None:
         # 오디오 청크를 열린 스트림에 write
@@ -82,6 +117,17 @@ class AudioPlayer:
         self._stream.write(chunk)
         # 16-bit PCM = 2 bytes per sample, 채널 1개
         self._total_frames += len(chunk) // 2
+
+    def get_as_heard_bytes(self) -> bytes:
+        # 루프백으로 캡처한 실제 재생 음성을 int16 PCM 바이트로 반환
+        # close_stream() 호출 후에 사용해야 모든 녹음 데이터가 수집됨
+        if not _LOOPBACK_AVAILABLE or not self._loopback_frames:
+            return b""
+        audio = np.concatenate(self._loopback_frames, axis=0)
+        if audio.ndim > 1:
+            audio = audio[:, 0]  # 첫 번째 채널만 사용 (mono)
+        audio_int16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+        return audio_int16.tobytes()
 
     def close_stream(self) -> tuple[float, float]:
         """스트림을 종료하고 (오디오_재생_시간ms, 끊김_시간ms) 튜플을 반환한다.
@@ -94,6 +140,11 @@ class AudioPlayer:
             self._stream.stop_stream()
             self._stream.close()
             self._stream = None
+        # PyAudio 버퍼 소진 후 루프백 녹음 중단 및 스레드 회수
+        self._loopback_stop.set()
+        if self._loopback_thread is not None:
+            self._loopback_thread.join(timeout=2.0)
+            self._loopback_thread = None
         audio_ms = (self._total_frames / _SAMPLE_RATE) * 1000
         stutter_ms = max(0.0, wall_ms - audio_ms)
         logger.info(

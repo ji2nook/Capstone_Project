@@ -120,6 +120,15 @@ class InputManager:
             # 서버가 이미 연결을 끊은 경우 — 지표 역전송을 건너뜀
             logger.warning("클라이언트 지표 역전송 실패 — 서버 연결이 이미 닫혔습니다")
 
+    async def send_as_heard_pcm(self, pcm_bytes: bytes) -> None:
+        # 루프백으로 캡처한 as-heard PCM을 바이너리 프레임으로 서버에 전송
+        if self._ws is None:
+            return
+        try:
+            await self._ws.send(pcm_bytes)
+        except ConnectionClosed:
+            logger.warning("as-heard PCM 전송 실패 — 서버 연결이 이미 닫혔습니다")
+
     async def send_buffer_feedback(
         self, buffer_level: int, starvation_count: int
     ) -> None:

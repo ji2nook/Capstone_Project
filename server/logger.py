@@ -181,6 +181,7 @@ def _merge(
         "buffer_starvation": buffer_starvation,
         "stutter_duration": stutter_duration,
         "audio_path": record.audio_path,
+        "as_heard_path": record.as_heard_path,
         # ping RTT 기반 네트워크 오버헤드 추정값 (ICMP RTT로 근사, 참고용)
         # llm_proc_est_ms = llm_latency - ping_llm_ms (LLM 순수 처리 시간 추정)
         # tts_proc_est_ms = tts_latency - ping_tts_ms (TTS 순수 처리 시간 추정)
@@ -240,10 +241,12 @@ def export(
     if _MOS_AVAILABLE:
         evaluator = _evaluator or MOSEvaluator()
         for rec in records:
-            if not rec.audio_path:
+            # as_heard_path가 있으면 체감 품질 기준으로 평가, 없으면 서버 TTS 파일로 폴백
+            eval_path = rec.as_heard_path or rec.audio_path
+            if not eval_path:
                 continue
             try:
-                mos = evaluator.evaluate(rec.audio_path)
+                mos = evaluator.evaluate(eval_path)
                 rec.utmos = mos.utmos
                 rec.nisqa_mos = mos.nisqa_mos
                 rec.nisqa_noisiness = mos.nisqa_noisiness
@@ -251,8 +254,7 @@ def export(
                 rec.nisqa_discontinuity = mos.nisqa_discontinuity
                 rec.nisqa_loudness = mos.nisqa_loudness
             except Exception:
-                logger.warning("MOS 평가 실패 (스킵): %s", rec.audio_path, exc_info=True)
-
+                logger.warning("MOS 평가 실패 (스킵): %s", eval_path, exc_info=True)
     else:
         logger.info("MOS 패키지 미설치 — MOS 평가 스킵 (tools/evaluate_mos.py로 별도 실행)")
 

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import wave
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -140,6 +141,20 @@ def _build_client_record(r: ClientMetrics) -> dict:
     }
 
 
+def _save_as_heard_wav(pcm_bytes: bytes, experiment: str) -> Path:
+    # WASAPI 루프백으로 캡처한 PCM을 WAV 파일로 저장하고 경로를 반환
+    prefix = _EXPERIMENT_PREFIX.get(experiment, experiment)
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    path = Path("results") / f"{prefix}_as_heard_{timestamp}.wav"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(24000)
+        wf.writeframes(pcm_bytes)
+    return path
+
+
 def _save_client_metrics(metrics: MetricsClient, experiment: str) -> None:
     # 클라이언트 지표를 results/ 디렉토리에 JSON으로 저장
     records = metrics.get_records()
@@ -253,6 +268,10 @@ async def main() -> None:
                                     await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
 
                             play_duration, stutter_duration = audio_player.close_stream()
+                            # close_stream() 후 루프백 녹음 스레드가 종료되므로 여기서 수집
+                            as_heard = audio_player.get_as_heard_bytes()
+                            if as_heard:
+                                _save_as_heard_wav(as_heard, experiment)
 
                             # 스트리밍의 경우 audio_bytes는 청크 단위로 재생됐으므로 b""로 표기
                             # t_recv = 첫 청크 수신 시각 → TTFA 계산에 사용
@@ -266,6 +285,9 @@ async def main() -> None:
                             buffer_starvation = jitter_buffer.starvation_count
 
                             metrics.record(result, play_duration, buffer_starvation, stutter_duration)
+
+                            # as-heard PCM을 서버로 전송 (서버에서 WAV 저장 후 MOS 평가)
+                            await input_manager.send_as_heard_pcm(as_heard)
 
                             await input_manager.send_client_metrics({
                                 "ttfa_client": (result.t_recv - result.t_send) * 1000,
@@ -328,6 +350,10 @@ async def main() -> None:
                                     await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
 
                             play_duration, stutter_duration = audio_player.close_stream()
+                            # close_stream() 후 루프백 녹음 스레드가 종료되므로 여기서 수집
+                            as_heard = audio_player.get_as_heard_bytes()
+                            if as_heard:
+                                _save_as_heard_wav(as_heard, experiment)
 
                             result = SessionResult(
                                 prompt=current_prompt,
@@ -339,6 +365,9 @@ async def main() -> None:
                             buffer_starvation = jitter_buffer.starvation_count
 
                             metrics.record(result, play_duration, buffer_starvation, stutter_duration)
+
+                            # as-heard PCM을 서버로 전송 (서버에서 WAV 저장 후 MOS 평가)
+                            await input_manager.send_as_heard_pcm(as_heard)
 
                             await input_manager.send_client_metrics({
                                 "ttfa_client": (result.t_recv - result.t_send) * 1000,
