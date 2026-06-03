@@ -336,7 +336,7 @@ async def main() -> None:
                             # 피드백은 drain 이전에 전송 — 실제 버퍼 수위를 반영
                             await input_manager.send_buffer_feedback(
                                 buffer_level=jitter_buffer.buffered_chunks,
-                                starvation_count=jitter_buffer.starvation_count,
+                                starvation_count=audio_player.starvation_count,
                             )
 
                             # pre-buffer: 최소 청크 수(_min_buffer) 이상 쌓인 후 재생 시작

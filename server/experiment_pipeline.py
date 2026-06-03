@@ -405,7 +405,7 @@ async def run_adaptive(
                 raw_audio_stream = api_manager.synthesize_streaming_audio(text_chunk)
                 async for audio_chunk in streaming_controller.tts_audio_chunker(
                     raw_audio_stream,
-                    max_chunk_bytes=audio_chunk_size,
+                    max_chunk_bytes=audio_chunk_size * 4,
                 ):
                     # TTS 오디오 수신 콜백: Step 5에서 tts_synthesis_rate 갱신에 활용
                     controller.on_tts_audio_received(len(audio_chunk))

@@ -112,7 +112,7 @@ async def tts_audio_chunker(
             continue
         buffer += raw_chunk
         boundary = _find_silence_boundary(
-            buffer, silence_threshold, min_silence_bytes, AUDIO_CHUNK_SIZE
+            buffer, silence_threshold, min_silence_bytes, max_chunk_bytes // 4
         )
         if boundary is not None:
             logger.debug("tts_audio_chunker: 무음 경계 %d bytes", boundary)
