@@ -29,15 +29,15 @@ MAX_AUDIO_CHUNK: int = 24000
 # 텍스트 청크 크기 결정 가중치; 합 = 1.0
 # 종합 점수가 높을수록 여유 있음 → 큰 청크 크기
 TEXT_WEIGHTS: dict[str, float] = {
-    "llm_token_rate":     0.20,   # LLM 빠름 -> 작은 청크 선호 (역관계)
+    "llm_token_rate":     0.20,   # LLM 빠름 -> 큰 청크 가능 / 느림 -> 작은 청크로 TTS 빠른 호출 (정관계)
     "tts_synthesis_rate": 0.25,   # TTS 빠름 -> 큰 청크 가능 (정관계)
-    "buffer_level":       0.30,   # 버퍼 여유 -> 큰 청크 가능 (정관계)
+    "buffer_level":       0.30,   # 버퍼 여유 -> 큰 청크 허용 / 버퍼 고갈 -> 작은 청크로 TTS 빠른 호출 (정관계)
     "latency":            0.15,   # TTS API 지연 높음 -> 큰 청크로 호출 횟수 최소화 (정관계)
     "throughput":         0.10,   # 처리량 높음 -> 큰 청크 가능 (정관계)
 }
 
 # 오디오 청크 크기 결정 가중치; 합 = 1.0
-# TTS 합성 속도가 주요 요인, 버퍼·네트워크는 보조 요인
+# 버퍼 상태가 주요 요인, TTS 속도·네트워크는 보조 요인
 AUDIO_WEIGHTS: dict[str, float] = {
     "tts_synthesis_rate": 0.30,
     "buffer_level":       0.40,

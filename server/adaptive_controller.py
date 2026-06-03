@@ -114,7 +114,7 @@ class AdaptiveController:
 
         # 마지막으로 처리한 starvation_count: 새로운 고갈 이벤트 감지
         self._prev_starvation: int = 0
-        # 버퍼 고갈로 cfg.MIN_TEXT_CHUNK를 반환한 누적 횟수
+        # 버퍼 고갈 이벤트 누적 횟수
         self._starvation_adjustments: int = 0
 
         # Step 7: 서버 시작 시 측정한 NetworkSnapshot으로 초기값 주입.
@@ -206,19 +206,18 @@ class AdaptiveController:
     # score가 높을수록 "버퍼/네트워크 여유 있음" -> 큰 청크를 의미한다.
 
     def _norm_llm_rate(self, rate: float) -> float:
-        """LLM 토큰 속도 → [0, 1]. 느릴수록 1.0 (큰 청크 선호, 역관계).
-        rate=0(초기) → 0.5 중립, rate=100 t/s → 0.0."""
+        """LLM 토큰 속도 → [0, 1]. 빠를수록 1.0 (큰 청크 가능, 정관계).
+        rate=0(초기) → 0.5 중립, rate=100 t/s → 1.0."""
         if rate <= 0.0:
             return 0.5
-        return 1.0 - _clamp(rate / 100.0, 0.0, 1.0)
+        return _clamp(rate / 100.0, 0.0, 1.0)
 
     def _norm_tts_rate(self, rate: float) -> float:
         """TTS 합성 속도 → [0, 1]. 빠를수록 1.0 (큰 청크 가능, 정관계).
-        rate=0(초기) → 0.5 중립, rate=500000 B/s → 1.0.
-        실측 범위(370K~1.3M B/s)를 반영해 60K에서 상향 조정."""
+        rate=0(초기) → 0.5 중립, 실측 범위(370K~1.3M B/s) 기준으로 1.3M B/s → 1.0."""
         if rate <= 0.0:
             return 0.5
-        return _clamp(rate / 500_000.0, 0.0, 1.0)
+        return _clamp(rate / 1_300_000.0, 0.0, 1.0)
 
     def _norm_buffer(self, level: int) -> float:
         """버퍼 청크 수 → [0, 1]. 많을수록 1.0 (여유 있음, 정관계).
@@ -231,7 +230,7 @@ class AdaptiveController:
     def _norm_latency_tts(self, latency_ms: float) -> float:
         """TTS API 지연 → [0, 1]. 높을수록 1.0 (API 호출 배치 효율 선호, 정관계).
         latency가 높을수록 TTS API 호출 횟수를 줄이기 위해 큰 텍스트 청크를 선호한다.
-        0ms → 0.0, 200ms 이상 → 1.0."""
+        latency=0(초기) → 0.5 중립, 200ms 이상 → 1.0."""
         if latency_ms <= 0.0:
             return 0.5
         return _clamp(latency_ms / 200.0, 0.0, 1.0)
@@ -239,18 +238,17 @@ class AdaptiveController:
     def _norm_latency(self, latency_ms: float) -> float:
         """클라이언트 딜리버리 지연 (proxy) → [0, 1]. 낮을수록 1.0 (역관계).
         latency가 높을수록 청크가 늦게 도착하므로 작은 오디오 청크를 자주 보내야 한다.
-        0ms → 1.0, 200ms 이상 → 0.0."""
+        latency=0(초기) → 0.5 중립, 200ms 이상 → 0.0."""
         if latency_ms <= 0.0:
             return 0.5
         return max(0.0, 1.0 - latency_ms / 200.0)
 
     def _norm_throughput(self, throughput_bps: float) -> float:
         """처리량 → [0, 1]. 높을수록 1.0 (전송 용량 충분, 정관계).
-        throughput=0(초기) → 0.5 중립, 8 MB/s 이상 → 1.0.
-        실측 네트워크(80 Mbps = 10 MB/s) 기준으로 100K에서 상향 조정."""
+        throughput=0(초기) → 0.5 중립, 실험 대역폭 범위(200~1000 kbps) 기준으로 1 Mbps → 1.0."""
         if throughput_bps <= 0.0:
             return 0.5
-        return _clamp(throughput_bps / 8_000_000.0, 0.0, 1.0)
+        return _clamp(throughput_bps / 125_000.0, 0.0, 1.0)
 
 
 
@@ -261,25 +259,29 @@ class AdaptiveController:
     def _compute_text_chunk_size(self) -> int:
         """가중치 기반 통합 텍스트 청크 크기 계산.
 
-        버퍼 고갈 신규 발생 시 cfg.MIN_TEXT_CHUNK 즉시 반환 (긴급 처리).
-        그 외에는 5개 요인을 정규화 후 가중합하여 [MIN, MAX] 선형 매핑한다.
+        5개 요인을 정규화 후 가중합하여 [MIN, MAX] 선형 매핑한다.
+        버퍼 여유가 있을수록 큰 청크를 허용하고, 고갈 상태일수록 작은 청크로
+        TTS를 빨리 호출해 오디오 확보 시간을 단축한다.
         """
         s = self._state
 
-        # 신규 starvation 이벤트 감지 → 긴급 축소
+        # 신규 starvation 이벤트 횟수만 추적 (청크 크기 즉시 변경 없음)
         if s.buffer_starvation_count > self._prev_starvation:
             self._prev_starvation = s.buffer_starvation_count
             self._starvation_adjustments += 1
             logger.info(
-                "_compute_text_chunk_size: 버퍼 고갈 감지 (count=%d), cfg.MIN_TEXT_CHUNK 반환",
+                "_compute_text_chunk_size: 버퍼 고갈 감지 (count=%d)",
                 s.buffer_starvation_count,
             )
-            return cfg.MIN_TEXT_CHUNK
+
+        # 버퍼 여유(level=10) → buffer_score=1.0 → 큰 청크 가능
+        # 버퍼 고갈(level=0) → buffer_score=0.0 → 작은 청크 → TTS를 빨리 호출해 오디오 확보
+        buffer_score = self._norm_buffer(s.buffer_level)
 
         score = (
             cfg.TEXT_WEIGHTS["llm_token_rate"]     * self._norm_llm_rate(s.llm_token_rate)      +
             cfg.TEXT_WEIGHTS["tts_synthesis_rate"] * self._norm_tts_rate(s.tts_synthesis_rate)  +
-            cfg.TEXT_WEIGHTS["buffer_level"]       * self._norm_buffer(s.buffer_level)          +
+            cfg.TEXT_WEIGHTS["buffer_level"]       * buffer_score                                +
             cfg.TEXT_WEIGHTS["latency"]            * self._norm_latency_tts(s.tts_latency_ms)  +
             cfg.TEXT_WEIGHTS["throughput"]         * self._norm_throughput(s.throughput_bps)
         )
@@ -340,7 +342,7 @@ class AdaptiveController:
 
     @property
     def starvation_adjustments(self) -> int:
-        """버퍼 고갈로 인해 cfg.MIN_TEXT_CHUNK를 긴급 반환한 누적 횟수."""
+        """버퍼 고갈 이벤트 누적 횟수."""
         return self._starvation_adjustments
 
     def snapshot(self) -> dict:
