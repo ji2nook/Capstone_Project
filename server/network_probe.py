@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import platform
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -21,6 +22,23 @@ class NetworkSnapshot:
     upload_mbps: float | None
     ping_llm_ms: float | None   # openrouter.ai 평균 RTT
     ping_tts_ms: float | None   # api.elevenlabs.io 평균 RTT
+    bandwidth_limit: str        # tc qdisc 대역폭 제한 (예: "200Kbit", "unlimited")
+
+
+def get_bandwidth_limit() -> str:
+    """eth0 인터페이스의 tc 대역폭 제한을 읽어 반환한다. 규칙 없으면 'unlimited' 반환."""
+    try:
+        result = subprocess.run(
+            ["tc", "qdisc", "show", "dev", "eth0"],
+            capture_output=True, text=True, timeout=2,
+        )
+        match = re.search(r"rate\s+(\S+)", result.stdout)
+        if match:
+            return match.group(1)
+        return "unlimited"
+    except Exception:
+        logger.warning("tc 명령어 실행 실패 — 대역폭 측정 스킵")
+        return "unknown"
 
 
 def _ping_host(host: str, count: int = _PING_COUNT) -> float | None:
@@ -80,6 +98,7 @@ async def snapshot() -> NetworkSnapshot:
 
     ping_llm, ping_tts, bw = await asyncio.gather(ping_llm_fut, ping_tts_fut, bw_fut)
     download, upload = bw
+    bandwidth = get_bandwidth_limit()
 
     snap = NetworkSnapshot(
         timestamp=ts,
@@ -87,12 +106,14 @@ async def snapshot() -> NetworkSnapshot:
         upload_mbps=upload,
         ping_llm_ms=ping_llm,
         ping_tts_ms=ping_tts,
+        bandwidth_limit=bandwidth,
     )
     logger.info(
-        "네트워크 측정 완료 — 다운: %s Mbps, 업: %s Mbps, LLM RTT: %s ms, TTS RTT: %s ms",
+        "네트워크 측정 완료 — 다운: %s Mbps, 업: %s Mbps, LLM RTT: %s ms, TTS RTT: %s ms, 대역폭 제한: %s",
         download,
         upload,
         ping_llm,
         ping_tts,
+        bandwidth,
     )
     return snap

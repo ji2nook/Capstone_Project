@@ -129,7 +129,8 @@ async def websocket_endpoint(
             # 클라이언트가 전송한 텍스트 프롬프트를 수신
             # 수신 전까지 코루틴은 이벤트 루프를 블로킹하지 않고 대기
             prompt: str = await websocket.receive_text()
-            logger.info("[%s] 프롬프트 수신 (%d자): %s…", experiment, len(prompt), prompt[:60])
+            bw = _net_snapshot.bandwidth_limit if _net_snapshot else "unknown"
+            logger.info("[%s] 프롬프트 수신 (%d자) | 대역폭 제한: %s — %s…", experiment, len(prompt), bw, prompt[:60])
 
             # ------------------------------
             # 실험 1: 순차적 파이프라인
