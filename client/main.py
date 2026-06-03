@@ -252,7 +252,7 @@ async def main() -> None:
                                 if remaining is not None:
                                     await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
 
-                            play_duration = audio_player.close_stream()
+                            play_duration, stutter_duration = audio_player.close_stream()
 
                             # 스트리밍의 경우 audio_bytes는 청크 단위로 재생됐으므로 b""로 표기
                             # t_recv = 첫 청크 수신 시각 → TTFA 계산에 사용
@@ -264,7 +264,6 @@ async def main() -> None:
                             )
 
                             buffer_starvation = jitter_buffer.starvation_count
-                            stutter_duration = jitter_buffer.stutter_duration_ms
 
                             metrics.record(result, play_duration, buffer_starvation, stutter_duration)
 
@@ -328,7 +327,7 @@ async def main() -> None:
                                 if remaining is not None:
                                     await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
 
-                            play_duration = audio_player.close_stream()
+                            play_duration, stutter_duration = audio_player.close_stream()
 
                             result = SessionResult(
                                 prompt=current_prompt,
@@ -338,7 +337,6 @@ async def main() -> None:
                             )
 
                             buffer_starvation = jitter_buffer.starvation_count
-                            stutter_duration = jitter_buffer.stutter_duration_ms
 
                             metrics.record(result, play_duration, buffer_starvation, stutter_duration)
 

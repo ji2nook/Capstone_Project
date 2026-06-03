@@ -83,15 +83,24 @@ class AudioPlayer:
         # 16-bit PCM = 2 bytes per sample, 채널 1개
         self._total_frames += len(chunk) // 2
 
-    def close_stream(self) -> float:
-        # 스트림을 종료하고 총 재생 시간(ms)을 반환
+    def close_stream(self) -> tuple[float, float]:
+        """스트림을 종료하고 (오디오_재생_시간ms, 끊김_시간ms) 튜플을 반환한다.
+
+        끊김 시간 = 벽시계 경과 시간 - 오디오 프레임 기반 재생 시간.
+        네트워크 대기로 PyAudio 하드웨어 버퍼가 고갈된 시간을 반영한다.
+        """
+        wall_ms = (time.perf_counter() - self._play_start) * 1000
         if self._stream is not None:
             self._stream.stop_stream()
             self._stream.close()
             self._stream = None
-        play_duration = (self._total_frames / _SAMPLE_RATE) * 1000
-        logger.info("스트리밍 스트림 종료 — 재생 시간: %.1fms", play_duration)
-        return play_duration
+        audio_ms = (self._total_frames / _SAMPLE_RATE) * 1000
+        stutter_ms = max(0.0, wall_ms - audio_ms)
+        logger.info(
+            "스트리밍 스트림 종료 — 오디오: %.1fms, 벽시계: %.1fms, 끊김: %.1fms",
+            audio_ms, wall_ms, stutter_ms,
+        )
+        return audio_ms, stutter_ms
 
     def close(self) -> None:
         # PyAudio 인스턴스 해체
