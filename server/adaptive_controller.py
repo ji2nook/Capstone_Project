@@ -225,17 +225,17 @@ class AdaptiveController:
         if s.tts_last_send_ts == 0.0:
             return cfg.DEFAULT_TEXT_CHUNK_SIZE
 
-        # 긴급 구간: TTS 호출당 오디오 최대 확보 (버퍼 빠르게 복구)
+        # 긴급 구간: TTS를 빠르게 호출해 오디오를 조기 확보 → MIN_TEXT_CHUNK
         if level <= cfg.BUFFER_CRITICAL:
-            return cfg.MAX_TEXT_CHUNK
-
-        # 안정 구간: 버퍼 여유 있으므로 반응성 우선
-        if level >= cfg.BUFFER_STABLE:
             return cfg.MIN_TEXT_CHUNK
 
-        # 중간 구간: 수위 상승 → 청크 크기 MAX에서 MIN으로 선형 감소
+        # 안정 구간: 버퍼 여유 있으므로 호출 효율 우선 → MAX_TEXT_CHUNK
+        if level >= cfg.BUFFER_STABLE:
+            return cfg.MAX_TEXT_CHUNK
+
+        # 중간 구간: 수위 상승 → 청크 크기 MIN에서 MAX로 선형 증가
         ratio = (level - cfg.BUFFER_CRITICAL) / (cfg.BUFFER_STABLE - cfg.BUFFER_CRITICAL)
-        size = cfg.MAX_TEXT_CHUNK - int(ratio * (cfg.MAX_TEXT_CHUNK - cfg.MIN_TEXT_CHUNK))
+        size = cfg.MIN_TEXT_CHUNK + int(ratio * (cfg.MAX_TEXT_CHUNK - cfg.MIN_TEXT_CHUNK))
         return int(_clamp(size, cfg.MIN_TEXT_CHUNK, cfg.MAX_TEXT_CHUNK))
 
     def _compute_audio_chunk_size(self) -> int:

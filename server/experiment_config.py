@@ -32,4 +32,4 @@ MAX_AUDIO_CHUNK: int = 24000
 # 안정 구간 (이상): 텍스트 최소 청크 → 반응성 우선
 #                   오디오 최대 청크 → 전송 효율 우선
 BUFFER_CRITICAL: int = 2
-BUFFER_STABLE:   int = 8
+BUFFER_STABLE:   int = 6

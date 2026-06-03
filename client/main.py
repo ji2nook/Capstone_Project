@@ -332,15 +332,18 @@ async def main() -> None:
                             chunk_count += 1
 
                             jitter_buffer.feed(event.data)
-                            drained = jitter_buffer.drain()
-                            if drained:
-                                await loop.run_in_executor(None, audio_player.feed_chunk, drained)
 
-                            # 청크 수신 직후 버퍼 상태 피드백 — 서버가 다음 청크 크기 조정에 활용
+                            # 피드백은 drain 이전에 전송 — 실제 버퍼 수위를 반영
                             await input_manager.send_buffer_feedback(
                                 buffer_level=jitter_buffer.buffered_chunks,
                                 starvation_count=jitter_buffer.starvation_count,
                             )
+
+                            # pre-buffer: 최소 청크 수(_min_buffer) 이상 쌓인 후 재생 시작
+                            if jitter_buffer.buffered_chunks >= jitter_buffer._min_buffer:
+                                drained = jitter_buffer.drain()
+                                if drained:
+                                    await loop.run_in_executor(None, audio_player.feed_chunk, drained)
 
                         elif isinstance(event, StreamingCycleEnd):
                             while jitter_buffer.buffered_chunks > 0:
