@@ -6,6 +6,8 @@ import os
 import uvicorn
 from dotenv import load_dotenv
 
+from server.network_probe import apply_bandwidth_limit, remove_bandwidth_limit
+
 load_dotenv()
 
 
@@ -32,6 +34,14 @@ if __name__ == "__main__":
     host: str = os.environ.get("HOST", "localhost")
     port: int = int(os.environ.get("PORT", "8765"))
 
+    # 대역폭 제한 입력 — 숫자만 입력하면 kbit 단위로 적용, 엔터는 무제한
+    bw_input = input("대역폭 제한 (kbps 숫자 입력, 무제한은 엔터): ").strip()
+    rate = f"{bw_input}kbit" if bw_input.isdigit() else ""
+    if rate:
+        apply_bandwidth_limit(rate)
+    else:
+        logger.info("대역폭 제한 없음 — 무제한으로 실행")
+
     logger.info("서버 시작 — ws://%s:%d/ws", host, port)
 
     try:
@@ -46,3 +56,6 @@ if __name__ == "__main__":
         )
     except (KeyboardInterrupt, SystemExit):
         logger.info("서버 종료")
+    finally:
+        if rate:
+            remove_bandwidth_limit()

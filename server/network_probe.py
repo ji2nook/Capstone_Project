@@ -25,6 +25,34 @@ class NetworkSnapshot:
     bandwidth_limit: str        # tc qdisc 대역폭 제한 (예: "200Kbit", "unlimited")
 
 
+def apply_bandwidth_limit(rate: str) -> None:
+    """eth0 인터페이스에 tc netem 대역폭 제한을 설정한다."""
+    subprocess.run(
+        ["sudo", "tc", "qdisc", "del", "dev", "eth0", "root"],
+        capture_output=True, timeout=5,
+    )
+    result = subprocess.run(
+        ["sudo", "tc", "qdisc", "add", "dev", "eth0", "root", "netem", "rate", rate],
+        capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode == 0:
+        logger.info("대역폭 제한 설정 완료: %s", rate)
+    else:
+        logger.warning("대역폭 제한 설정 실패: %s", result.stderr.strip())
+
+
+def remove_bandwidth_limit() -> None:
+    """eth0 인터페이스의 tc 규칙을 제거한다."""
+    result = subprocess.run(
+        ["sudo", "tc", "qdisc", "del", "dev", "eth0", "root"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode == 0:
+        logger.info("대역폭 제한 해제 완료")
+    else:
+        logger.debug("대역폭 제한 해제: 적용된 규칙 없음 (무시)")
+
+
 def get_bandwidth_limit() -> str:
     """eth0 인터페이스의 tc 대역폭 제한을 읽어 반환한다. 규칙 없으면 'unlimited' 반환."""
     try:
