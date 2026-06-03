@@ -397,7 +397,8 @@ async def run_adaptive(
     async def _tts_worker(text_chunk: str, audio_q: asyncio.Queue) -> None:
         # 이 텍스트 청크를 처리할 시점의 오디오 청크 크기 결정
         audio_chunk_size = controller.decide_audio_chunk_size()
-        decided_audio_chunk_sizes.append(audio_chunk_size)
+        max_chunk_bytes = audio_chunk_size * 4
+        decided_audio_chunk_sizes.append(max_chunk_bytes)
         try:
             if _TTS_STRESS_MS_PER_CHAR > 0:
                 await asyncio.sleep(len(text_chunk) * _TTS_STRESS_MS_PER_CHAR / 1000)
@@ -405,7 +406,7 @@ async def run_adaptive(
                 raw_audio_stream = api_manager.synthesize_streaming_audio(text_chunk)
                 async for audio_chunk in streaming_controller.tts_audio_chunker(
                     raw_audio_stream,
-                    max_chunk_bytes=audio_chunk_size * 4,
+                    max_chunk_bytes=max_chunk_bytes,
                 ):
                     # TTS 오디오 수신 콜백: Step 5에서 tts_synthesis_rate 갱신에 활용
                     controller.on_tts_audio_received(len(audio_chunk))
