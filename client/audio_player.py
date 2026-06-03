@@ -82,8 +82,11 @@ class AudioPlayer:
             output=True,
             frames_per_buffer=_CHUNK_SIZE,
         )
-        self._play_start = time.perf_counter()
+        self._play_start = 0.0  # 첫 feed_chunk() 호출 시 기록 — TTFA 대기 시간 제외
         self._total_frames = 0
+        self._starvation_count = 0
+        self._last_feed_time = 0.0      # 직전 feed_chunk() 호출 시각
+        self._last_chunk_dur_s = 0.0    # 직전 청크의 재생 길이(초)
         self._loopback_frames = []
         self._loopback_stop = threading.Event()
         if _LOOPBACK_AVAILABLE:
@@ -114,9 +117,29 @@ class AudioPlayer:
         if self._stream is None:
             logger.warning("feed_chunk 호출: 스트림이 열려 있지 않음")
             return
-        self._stream.write(chunk)
+        now = time.perf_counter()
+        if self._play_start == 0.0:
+            self._play_start = now
+        else:
+            # 직전 청크 재생 시간보다 실제 갭이 길면 하드웨어 버퍼가 고갈된 것
+            if now - self._last_feed_time > self._last_chunk_dur_s:
+                self._starvation_count += 1
+                logger.debug(
+                    "버퍼 고갈 감지 — gap=%.1fms, 청크재생=%.1fms, count=%d",
+                    (now - self._last_feed_time) * 1000,
+                    self._last_chunk_dur_s * 1000,
+                    self._starvation_count,
+                )
+        self._last_feed_time = now
         # 16-bit PCM = 2 bytes per sample, 채널 1개
+        self._last_chunk_dur_s = (len(chunk) // 2) / _SAMPLE_RATE
+        self._stream.write(chunk)
         self._total_frames += len(chunk) // 2
+
+    @property
+    def starvation_count(self) -> int:
+        # feed_chunk() 간 갭 기반으로 측정한 버퍼 고갈 횟수
+        return self._starvation_count
 
     def get_as_heard_bytes(self) -> bytes:
         # 루프백으로 캡처한 실제 재생 음성을 int16 PCM 바이트로 반환
@@ -135,7 +158,7 @@ class AudioPlayer:
         끊김 시간 = 벽시계 경과 시간 - 오디오 프레임 기반 재생 시간.
         네트워크 대기로 PyAudio 하드웨어 버퍼가 고갈된 시간을 반영한다.
         """
-        wall_ms = (time.perf_counter() - self._play_start) * 1000
+        wall_ms = (time.perf_counter() - self._play_start) * 1000 if self._play_start > 0.0 else 0.0
         if self._stream is not None:
             self._stream.stop_stream()
             self._stream.close()

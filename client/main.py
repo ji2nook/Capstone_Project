@@ -267,6 +267,7 @@ async def main() -> None:
                                 if remaining is not None:
                                     await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
 
+                            buffer_starvation = audio_player.starvation_count
                             play_duration, stutter_duration = audio_player.close_stream()
                             # close_stream() 후 루프백 녹음 스레드가 종료되므로 여기서 수집
                             as_heard = audio_player.get_as_heard_bytes()
@@ -281,8 +282,6 @@ async def main() -> None:
                                 t_send=current_t_send,
                                 t_recv=current_t_first_recv,
                             )
-
-                            buffer_starvation = jitter_buffer.starvation_count
 
                             metrics.record(result, play_duration, buffer_starvation, stutter_duration)
 
@@ -349,6 +348,7 @@ async def main() -> None:
                                 if remaining is not None:
                                     await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
 
+                            buffer_starvation = audio_player.starvation_count
                             play_duration, stutter_duration = audio_player.close_stream()
                             # close_stream() 후 루프백 녹음 스레드가 종료되므로 여기서 수집
                             as_heard = audio_player.get_as_heard_bytes()
@@ -361,8 +361,6 @@ async def main() -> None:
                                 t_send=current_t_send,
                                 t_recv=current_t_first_recv,
                             )
-
-                            buffer_starvation = jitter_buffer.starvation_count
 
                             metrics.record(result, play_duration, buffer_starvation, stutter_duration)
 

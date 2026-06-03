@@ -1,4 +1,5 @@
 venv/
+venv_local/
 .env
 Experiment1_Plan.md
 Experiment1_Implementation.md
