@@ -72,42 +72,16 @@ class AudioPlayer:
         )
         self._play_start = time.perf_counter()
         self._total_frames = 0
-        self._audio_cursor_s: float = 0.0        # 누적 오디오 시간 (초)
-        self._as_heard: bytearray = bytearray()  # 무음 포함 재구성 오디오
-        self._first_chunk_time: float | None = None  # 첫 청크 수신 시각
         logger.info("스트리밍 스트림 오픈")
 
     def feed_chunk(self, chunk: bytes) -> None:
-        # 오디오 청크를 열린 스트림에 write하고, 벽시계 기반으로 무음 구간을 삽입해 as-heard 버퍼에 기록
+        # 오디오 청크를 열린 스트림에 write
         if self._stream is None:
             logger.warning("feed_chunk 호출: 스트림이 열려 있지 않음")
             return
-
-        now = time.perf_counter()
-
-        if self._first_chunk_time is None:
-            # 첫 번째 청크: 기준 시각 설정만 하고 gap 없음
-            # TTFA 대기 시간은 끊김이 아니므로 무음 삽입 제외
-            self._first_chunk_time = now
-        else:
-            # 이후 청크: 첫 청크 기준 벽시계와 누적 오디오 시간 비교
-            # 차이만큼이 실제 네트워크 대기(끊김) 구간
-            wall_elapsed_s = now - self._first_chunk_time
-            gap_s = wall_elapsed_s - self._audio_cursor_s
-            if gap_s > 0.005:  # 5ms 미만은 부동소수점 오차로 간주해 무시
-                silence_samples = int(gap_s * _SAMPLE_RATE)
-                self._as_heard.extend(b"\x00" * silence_samples * 2)
-                self._audio_cursor_s += gap_s
-
         self._stream.write(chunk)
-        self._as_heard.extend(chunk)
         # 16-bit PCM = 2 bytes per sample, 채널 1개
         self._total_frames += len(chunk) // 2
-        self._audio_cursor_s += len(chunk) / 2 / _SAMPLE_RATE
-
-    def get_as_heard_bytes(self) -> bytes:
-        """무음 구간이 삽입된, 실제 청취 경험에 해당하는 PCM 바이트를 반환한다."""
-        return bytes(self._as_heard)
 
     def close_stream(self) -> tuple[float, float]:
         """스트림을 종료하고 (오디오_재생_시간ms, 끊김_시간ms) 튜플을 반환한다.

@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import wave
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -141,20 +140,6 @@ def _build_client_record(r: ClientMetrics) -> dict:
     }
 
 
-def _save_as_heard_wav(pcm_bytes: bytes, experiment: str, index: int) -> Path:
-    # 무음 포함 재구성 PCM을 WAV 파일로 저장하고 경로를 반환
-    prefix = _EXPERIMENT_PREFIX.get(experiment, experiment)
-    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
-    path = Path("results") / f"{prefix}_client_audio_{timestamp}_{index}.wav"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(24000)
-        wf.writeframes(pcm_bytes)
-    return path
-
-
 def _save_client_metrics(metrics: MetricsClient, experiment: str) -> None:
     # 클라이언트 지표를 results/ 디렉토리에 JSON으로 저장
     records = metrics.get_records()
@@ -234,7 +219,6 @@ async def main() -> None:
                     current_t_first_recv = 0.0
                     total_bytes = 0
                     chunk_count = 0
-                    cycle_index = 0
 
                     async for event in input_manager.run_streaming():
                         if isinstance(event, StreamingCycleStart):
@@ -268,12 +252,7 @@ async def main() -> None:
                                 if remaining is not None:
                                     await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
 
-                            as_heard = audio_player.get_as_heard_bytes()
                             play_duration, stutter_duration = audio_player.close_stream()
-
-                            # 무음 포함 as-heard WAV 로컬 저장 (로컬 백업용)
-                            as_heard_path = _save_as_heard_wav(as_heard, experiment, cycle_index)
-                            cycle_index += 1
 
                             # 스트리밍의 경우 audio_bytes는 청크 단위로 재생됐으므로 b""로 표기
                             # t_recv = 첫 청크 수신 시각 → TTFA 계산에 사용
@@ -287,9 +266,6 @@ async def main() -> None:
                             buffer_starvation = jitter_buffer.starvation_count
 
                             metrics.record(result, play_duration, buffer_starvation, stutter_duration)
-
-                            # as-heard PCM을 서버로 전송 (서버에서 WAV 저장 후 MOS 평가)
-                            await input_manager.send_as_heard_pcm(as_heard)
 
                             await input_manager.send_client_metrics({
                                 "ttfa_client": (result.t_recv - result.t_send) * 1000,
@@ -318,7 +294,6 @@ async def main() -> None:
                     current_t_first_recv = 0.0
                     total_bytes = 0
                     chunk_count = 0
-                    cycle_index = 0
 
                     async for event in input_manager.run_streaming():
                         if isinstance(event, StreamingCycleStart):
@@ -352,12 +327,7 @@ async def main() -> None:
                                 if remaining is not None:
                                     await loop.run_in_executor(None, audio_player.feed_chunk, remaining)
 
-                            as_heard = audio_player.get_as_heard_bytes()
                             play_duration, stutter_duration = audio_player.close_stream()
-
-                            # 무음 포함 as-heard WAV 저장 — MOS 오프라인 평가용
-                            as_heard_path = _save_as_heard_wav(as_heard, experiment, cycle_index)
-                            cycle_index += 1
 
                             result = SessionResult(
                                 prompt=current_prompt,
@@ -369,9 +339,6 @@ async def main() -> None:
                             buffer_starvation = jitter_buffer.starvation_count
 
                             metrics.record(result, play_duration, buffer_starvation, stutter_duration)
-
-                            # as-heard PCM을 서버로 전송 (서버에서 WAV 저장 후 MOS 평가)
-                            await input_manager.send_as_heard_pcm(as_heard)
 
                             await input_manager.send_client_metrics({
                                 "ttfa_client": (result.t_recv - result.t_send) * 1000,
