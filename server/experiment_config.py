@@ -33,3 +33,42 @@ MAX_AUDIO_CHUNK: int = 24000
 #                   오디오 최대 청크 → 전송 효율 우선
 BUFFER_CRITICAL: int = 2
 BUFFER_STABLE:   int = 6
+
+
+# ========================================
+# 실험 3 — ABR 가중치 기반 제어 파라미터
+# ========================================
+#
+# score = Σ(가중치 × 정규화된 지표값),  score ∈ [0, 1]
+# size  = MIN + score × (MAX - MIN)
+#
+# 정비례 지표: 값이 클수록 score ↑ → 청크 크기 ↑
+# 반비례 지표: 값이 클수록 score ↓ → 청크 크기 ↓  (정규화 시 1 - norm 적용)
+
+# ── 정규화 기준값 ─────────────────────────────────────────────────────────────
+# 각 지표를 [0, 1]로 정규화할 때 사용하는 상한값.
+# 이 값 이상이면 정규화 결과 = 1.0으로 클리핑된다.
+
+# 버퍼 수위: BUFFER_STABLE 이상이면 최대 기여
+BUFFER_LEVEL_MAX_NORM: int = BUFFER_STABLE           # = 6 청크
+# TTS 합성 속도: 16kHz·16-bit·mono 실시간 재생 속도를 기준으로 설정
+TTS_SYNTHESIS_RATE_MAX_BPS: float = 32_000.0         # bytes/s
+# LLM 토큰 생성 속도
+LLM_RATE_MAX: float = 30.0                           # tokens/s
+# 네트워크 지연 (반비례 — 낮을수록 청크 ↑)
+LATENCY_MAX_MS: float = 300.0                        # ms
+# 전송 처리량
+THROUGHPUT_MAX_BPS: float = 128_000.0                # bytes/s ≈ 1 Mbps
+
+# ── 텍스트 청크 결정 가중치 (합 = 1.0) ───────────────────────────────────────
+TEXT_W_BUFFER:     float = 0.30   # 버퍼 레벨          (정비례)
+TEXT_W_TTS_RATE:   float = 0.25   # TTS 음성 생성 속도  (정비례)
+TEXT_W_LLM_RATE:   float = 0.20   # LLM 토큰 생성 속도  (정비례)
+TEXT_W_LATENCY:    float = 0.15   # Latency            (반비례)
+TEXT_W_THROUGHPUT: float = 0.10   # Throughput         (정비례)
+
+# ── 오디오 청크 결정 가중치 (합 = 1.0) ───────────────────────────────────────
+AUDIO_W_BUFFER:     float = 0.40  # 버퍼 레벨          (정비례)
+AUDIO_W_TTS_RATE:   float = 0.30  # TTS 음성 생성 속도  (정비례)
+AUDIO_W_LATENCY:    float = 0.20  # Latency            (반비례)
+AUDIO_W_THROUGHPUT: float = 0.10  # Throughput         (정비례)

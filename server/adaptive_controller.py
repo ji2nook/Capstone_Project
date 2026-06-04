@@ -209,12 +209,11 @@ class AdaptiveController:
     # ========================================
 
     def _compute_text_chunk_size(self) -> int:
-        """ABR 버퍼 수위 기반 텍스트 청크 크기 결정.
+        """가중치 합산 방식으로 텍스트 청크 크기 결정.
 
-        버퍼 수위를 단일 제어 신호로 사용한다.
-        - 긴급 구간: TTS 호출당 오디오 최대 확보 → MAX_TEXT_CHUNK
-        - 안정 구간: 반응성 우선 → MIN_TEXT_CHUNK
-        - 중간 구간: 선형 보간
+        score = Σ(가중치 × 정규화된 지표값)
+        size  = MIN + score × (MAX - MIN)
+
         초기 상태(첫 TTS 호출 전)는 스트리밍 기준값을 사용해 TTFA를 보존한다.
         """
         s = self._state
@@ -224,8 +223,6 @@ class AdaptiveController:
             self._starvation_adjustments += 1
             logger.info("_compute_text_chunk_size: 버퍼 고갈 (count=%d)", s.buffer_starvation_count)
 
-        level = s.buffer_level
-
         # 피드백 미수신 구간: 클라이언트 버퍼에 청크가 한 번도 쌓이지 않았으면
         # buffer_level 신호가 신뢰할 수 없으므로 스트리밍 기준값을 유지
         # (짧은 응답에서는 텍스트 청크 결정이 오디오 재생 시작 전에 끝나므로
@@ -233,42 +230,49 @@ class AdaptiveController:
         if s.tts_last_send_ts == 0.0 or not self._feedback_received:
             return cfg.DEFAULT_TEXT_CHUNK_SIZE
 
-        # 긴급 구간: TTS를 빠르게 호출해 오디오를 조기 확보 → MIN_TEXT_CHUNK
-        if level <= cfg.BUFFER_CRITICAL:
-            return cfg.MIN_TEXT_CHUNK
+        # 정규화 (각 지표를 [0, 1]로 변환)
+        norm_buffer    = _clamp(s.buffer_level / cfg.BUFFER_LEVEL_MAX_NORM, 0.0, 1.0)
+        norm_tts_rate  = _clamp(s.tts_synthesis_rate / cfg.TTS_SYNTHESIS_RATE_MAX_BPS, 0.0, 1.0)
+        norm_llm_rate  = _clamp(s.llm_token_rate / cfg.LLM_RATE_MAX, 0.0, 1.0)
+        norm_latency   = 1.0 - _clamp(s.latency_ms / cfg.LATENCY_MAX_MS, 0.0, 1.0)  # 반비례
+        norm_throughput = _clamp(s.throughput_bps / cfg.THROUGHPUT_MAX_BPS, 0.0, 1.0)
 
-        # 안정 구간: 버퍼 여유 있으므로 호출 효율 우선 → MAX_TEXT_CHUNK
-        if level >= cfg.BUFFER_STABLE:
-            return cfg.MAX_TEXT_CHUNK
-
-        # 중간 구간: 수위 상승 → 청크 크기 MIN에서 MAX로 선형 증가
-        ratio = (level - cfg.BUFFER_CRITICAL) / (cfg.BUFFER_STABLE - cfg.BUFFER_CRITICAL)
-        size = cfg.MIN_TEXT_CHUNK + int(ratio * (cfg.MAX_TEXT_CHUNK - cfg.MIN_TEXT_CHUNK))
+        score = (
+            cfg.TEXT_W_BUFFER     * norm_buffer
+            + cfg.TEXT_W_TTS_RATE   * norm_tts_rate
+            + cfg.TEXT_W_LLM_RATE   * norm_llm_rate
+            + cfg.TEXT_W_LATENCY    * norm_latency
+            + cfg.TEXT_W_THROUGHPUT * norm_throughput
+        )
+        size = cfg.MIN_TEXT_CHUNK + int(score * (cfg.MAX_TEXT_CHUNK - cfg.MIN_TEXT_CHUNK))
+        logger.debug("_compute_text_chunk_size: score=%.3f, size=%d", score, size)
         return int(_clamp(size, cfg.MIN_TEXT_CHUNK, cfg.MAX_TEXT_CHUNK))
 
     def _compute_audio_chunk_size(self) -> int:
-        """ABR 버퍼 수위 기반 오디오 청크 크기 결정.
+        """가중치 합산 방식으로 오디오 청크 크기 결정.
 
-        버퍼 수위를 단일 제어 신호로 사용한다.
-        - 긴급 구간: 클라이언트에 빠른 전달 → MIN_AUDIO_CHUNK
-        - 안정 구간: 전송 효율 우선 → MAX_AUDIO_CHUNK
-        - 중간 구간: 선형 보간
+        score = Σ(가중치 × 정규화된 지표값)
+        size  = MIN + score × (MAX - MIN)
+
         PCM 16-bit(2바이트) 경계로 정렬하여 샘플 잘림을 방지한다.
         """
         s = self._state
-        level = s.buffer_level
 
-        # 긴급 구간: 작은 청크로 클라이언트 버퍼를 빠르게 채움
-        if level <= cfg.BUFFER_CRITICAL:
-            return (cfg.MIN_AUDIO_CHUNK // 2) * 2
+        # 정규화 (각 지표를 [0, 1]로 변환)
+        norm_buffer    = _clamp(s.buffer_level / cfg.BUFFER_LEVEL_MAX_NORM, 0.0, 1.0)
+        norm_tts_rate  = _clamp(s.tts_synthesis_rate / cfg.TTS_SYNTHESIS_RATE_MAX_BPS, 0.0, 1.0)
+        norm_latency   = 1.0 - _clamp(s.latency_ms / cfg.LATENCY_MAX_MS, 0.0, 1.0)  # 반비례
+        norm_throughput = _clamp(s.throughput_bps / cfg.THROUGHPUT_MAX_BPS, 0.0, 1.0)
 
-        # 안정 구간: 큰 청크로 전송 효율 극대화
-        if level >= cfg.BUFFER_STABLE:
-            return (cfg.MAX_AUDIO_CHUNK // 2) * 2
-
-        # 중간 구간: 수위 상승 → 청크 크기 MIN에서 MAX로 선형 증가
-        ratio = (level - cfg.BUFFER_CRITICAL) / (cfg.BUFFER_STABLE - cfg.BUFFER_CRITICAL)
-        size = cfg.MIN_AUDIO_CHUNK + int(ratio * (cfg.MAX_AUDIO_CHUNK - cfg.MIN_AUDIO_CHUNK))
+        score = (
+            cfg.AUDIO_W_BUFFER     * norm_buffer
+            + cfg.AUDIO_W_TTS_RATE   * norm_tts_rate
+            + cfg.AUDIO_W_LATENCY    * norm_latency
+            + cfg.AUDIO_W_THROUGHPUT * norm_throughput
+        )
+        size = cfg.MIN_AUDIO_CHUNK + int(score * (cfg.MAX_AUDIO_CHUNK - cfg.MIN_AUDIO_CHUNK))
+        size = int(_clamp(size, cfg.MIN_AUDIO_CHUNK, cfg.MAX_AUDIO_CHUNK))
+        logger.debug("_compute_audio_chunk_size: score=%.3f, size=%d", score, size)
         return (size // 2) * 2
 
 
