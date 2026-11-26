@@ -178,8 +178,8 @@ TTS 태스크들이 병렬 실행되어도 `asyncio.Queue` 파이프라인이 �
 ## 🛠️ 실행 방법
 
 ```bash
-git clone https://github.com/ji2nook/Capstone_Project.git
-cd Capstone_Project
+git clone https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games.git
+cd Adaptive_Streaming_LLM_TTS_for_Games
 
 python -m venv venv
 venv\Scripts\activate        # Windows
