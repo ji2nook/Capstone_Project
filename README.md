@@ -48,6 +48,7 @@ NVIDIA ACE, Ubisoft NEO NPC 등 게임 산업에서 LLM 기반 NPC 대화 시스
 | 텍스트 청크 | — | 고정 80자 | 동적 **40~200자** |
 | 오디오 청크 | 1회 전송 | 고정 12,000 bytes | 동적 **12,000~24,000 bytes** |
 | 피드백 루프 | 없음 | 없음 | buffer_level + starvation_count |
+| Pre-buffer | — | 없음 (수신 즉시 재생) | 5청크 누적 후 재생 시작 |
 
 ---
 
@@ -77,7 +78,7 @@ NVIDIA ACE, Ubisoft NEO NPC 등 게임 산업에서 LLM 기반 NPC 대화 시스
 ```
 LLM 토큰 스트림 → llm_text_chunker (최대 80자)
     → TTS 병렬 태스크 → tts_audio_chunker (무음 경계, 버퍼 상한 48,000 bytes)
-        → 청크 반복 전송 → JitterBuffer (pre-buffer 5청크) → 재생
+        → 청크 반복 전송 → JitterBuffer (수신 즉시 재생)
 ```
 
 ### 실험 Ⅲ — 적응형 스트리밍 (ABR)
@@ -146,7 +147,7 @@ TTS 태스크들이 병렬 실행되어도 `asyncio.Queue` 파이프라인이 �
 ## 🔧 트러블슈팅
 
 <details>
-<summary><b>1. 적응형 스트리밍 방식의 음성 끊김이 고정 청크 방식보다 오히려 더 자주 끊기던 문제 - ABR 피드백이 항상 "버퍼 0"으로 들어옴</b></summary>
+<summary><b>1. 적응형 스트리밍 방식이 고정 청크 방식보다 오히려 더 자주 끊기던 문제 - ABR 피드백이 항상 "버퍼 0"으로 들어옴</b></summary>
 
 **문제**
 적응형(실험 Ⅲ)이 고정 청크 스트리밍보다 버퍼 고갈이 더 잦았습니다.
@@ -162,7 +163,7 @@ TTS 태스크들이 병렬 실행되어도 `asyncio.Queue` 파이프라인이 �
 3. 끊김 집계 기준을 AudioPlayer로 교체하고, 오디오 청크 상한을 고정 스트리밍과 같은 1:4 비율로 통일 ([91574a5](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/91574a5))
 
 **결과**
-현재의 가중치 합산 방식으로 확장 완료하여 적응형 스트리밍 방식의 음성 끊김을 완화하였습니다 ([3c1afbf](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/3c1afbf)). 다만 400 kbps 이하에서는 여전히 한계가 있으며, 이는 [실험 결과 — 저대역폭 한계](#-실험-결과)에 기술했습니다.
+청크 크기 결정 방식을 버퍼 수위 단일 신호에서 5개 지표 가중치 합산으로 확장했습니다 ([3c1afbf](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/3c1afbf)). 다만 400 kbps 이하에서는 여전히 한계가 있으며, 이는 [실험 결과 — 저대역폭 한계](#-실험-결과)에 기술했습니다.
 
 </details>
 
@@ -179,7 +180,7 @@ MOS를 서버가 생성한 TTS 원본 WAV로 평가한 결과, 재생 중 발생
 Windows **WASAPI 루프백**으로 스피커에 출력되는 디지털 신호를 직접 녹음하는 방식으로 전환했습니다 ([f6fc1a7](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/f6fc1a7)). 마이크를 쓰지 않아 외부 소음이 섞이지 않고, 녹음 라이브러리가 없는 환경에서는 기존 방식으로 자동 폴백합니다.
 
 **결과**
-측정 대상이 실제 사용자 경험과 일치하는지 검증을 완료하였고, 연구의 신뢰성을 확보하였습니다.
+재생 중 발생한 끊김이 MOS 평가에 반영되도록 평가 기준을 바로잡았습니다. 이 기준으로 측정한 NISQA 불연속성 점수에서, 제한 없음 조건의 적응형(4.69)과 고정 스트리밍(4.26)의 끊김 차이가 명확히 드러났습니다.
 
 </details>
 
@@ -252,7 +253,7 @@ Azure VM(RAM 4 GB)에서 실험을 반복하던 중 서버 프로세스가 `OOM 
 ## 🛠️ 실행 방법
 
 **실행 환경 조건**
-- 서버: Linux 필요 (`tc netem ` 대역폭 제한 사용, `sudo` 권한)
+- 서버: Linux 필요 (`tc netem` 대역폭 제한 사용, `sudo` 권한)
 - 클라이언트: Windows 필요 (WASAPI 루프백 녹음 사용)
 - OpenRouter API 키, ElevenLabs API 키 필요
 
@@ -262,7 +263,7 @@ cd Adaptive_Streaming_LLM_TTS_for_Games
 
 python -m venv venv
 venv\Scripts\activate        # Windows
-source venv\Scripts\activate
+source venv/bin/activate     # Linux / macOS
 
 pip install -r requirements.txt
 cp .env.example .env         # LLM_API_KEY, TTS_API_KEY 입력
