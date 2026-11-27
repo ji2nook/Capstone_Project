@@ -15,8 +15,10 @@
 - [실험 설계](#-실험-설계)
 - [핵심 알고리즘](#-핵심-알고리즘)
 - [실험 결과](#-실험-결과)
+- [트러블슈팅](#-트러블슈팅)
 - [저장소 구조](#-저장소-구조)
 - [실행 방법](#️-실행-방법)
+- [라이선스 및 기여](#-라이선스-및-기여)
 
 ---
 
@@ -141,6 +143,76 @@ TTS 태스크들이 병렬 실행되어도 `asyncio.Queue` 파이프라인이 �
 
 ---
 
+## 🔧 트러블슈팅
+
+<details>
+<summary><b>1. 적응형 스트리밍 방식의 음성 끊김이 고정 청크 방식보다 오히려 더 자주 끊기던 문제 - ABR 피드백이 항상 "버퍼 0"으로 들어옴</b></summary>
+
+**문제**
+적응형(실험 Ⅲ)이 고정 청크 스트리밍보다 버퍼 고갈이 더 잦았습니다.
+
+**원인**
+- 클라이언트가 받은 청크를 JitterBuffer에서 즉시 drain하여 재생한 뒤에 버퍼 수위를 보고하는 방식으로 인해, 서버에는 항상 `buffer_level = 0`이 전달되었습니다. ABR 컨트롤러는 매 구간을 긴급한 상태로 판단하여 의도와는 다른 청크 크기를 설정하였습니다.
+- 끊김 횟수를 실제 재생 레이어(AudioPlayer)가 아닌 JitterBuffer 기준으로 측정하여, 실제 underrun이 서버에 정확히 반영되지 않았습니다.
+- 적응형 방식의 오디오 청크 상한이 고정 스트리밍과 다른 비율로 설정되어 있었습니다.
+
+**해결**
+1. 버퍼 피드백을 drain 이전에 전송하도록 순서 변경 ([390c0b3](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/390c0b3))
+2. 재생 시작 전 최소 누적 청크(pre-buffer)를 3개에서 5개로 조정 ([6c3e4fa](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/6c3e4fa))
+3. 끊김 집계 기준을 AudioPlayer로 교체하고, 오디오 청크 상한을 고정 스트리밍과 같은 1:4 비율로 통일 ([91574a5](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/91574a5))
+
+**결과**
+현재의 가중치 합산 방식으로 확장 완료하여 적응형 스트리밍 방식의 음성 끊김을 완화하였습니다 ([3c1afbf](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/3c1afbf)). 다만 400 kbps 이하에서는 여전히 한계가 있으며, 이는 [실험 결과 — 저대역폭 한계](#-실험-결과)에 기술했습니다.
+
+</details>
+
+<details>
+<summary><b>2. MOS 점수가 실제로 재생된 음성을 반영하지 못하던 문제 - as-heard MOS 평가 전환</b></summary>
+
+**문제**
+MOS를 서버가 생성한 TTS 원본 WAV로 평가한 결과, 재생 중 발생한 끊김이 음성 품질 점수에 반영되지 않았습니다. 끊김이 많은 음성도 높은 점수를 받게 됩니다.
+
+**1차 해결 방식**
+클라이언트의 재생 시각을 기준으로 끊긴 구간에 강제로 무음 구간을 삽입하여 오디오를 재구성했습니다 ([59c56ac](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/59c56ac)). 하지만 재구성한 오디오가 실제 체감 음질과 차이가 있어 평가 대상으로 부적합하다고 판단하고, 관련 코드를 전면 되돌렸습니다 ([1f37134](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/1f37134)).
+
+**2차 해결 방식**
+Windows **WASAPI 루프백**으로 스피커에 출력되는 디지털 신호를 직접 녹음하는 방식으로 전환했습니다 ([f6fc1a7](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/f6fc1a7)). 마이크를 쓰지 않아 외부 소음이 섞이지 않고, 녹음 라이브러리가 없는 환경에서는 기존 방식으로 자동 폴백합니다.
+
+**결과**
+측정 대상이 실제 사용자 경험과 일치하는지 검증을 완료하였고, 연구의 신뢰성을 확보하였습니다.
+
+</details>
+
+<details>
+<summary><b>3. 반복 실험 중 서버가 OOM으로 강제 종료되던 문제</b></summary>
+
+**문제**
+Azure VM(RAM 4 GB)에서 실험을 반복하던 중 서버 프로세스가 `OOM Killed`로 인해 종료되었습니다.
+
+**원인**
+매 세션 종료 시점에 UTMOS 모델을 로드하는 구조여서, 다음 클라이언트 연결 처리와 모델 로딩이 겹칠 때 메모리 사용량이 급증했습니다.
+
+**해결**
+서버 시작(FastAPI lifespan) 시 모델을 한 번만 미리 로드해 재사용하는 싱글턴 구조로 변경했습니다 ([a3522f2](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/a3522f2)).
+
+**결과**
+매 실험마다 별도의 서버 재시작 과정 없이 실험 전체를 완수하였습니다.
+
+</details>
+
+<details>
+<summary><b>4. TTS 동시 요청 한도 초과로 오디오가 전혀 출력되지 않던 문제</b></summary>
+
+**문제**
+스트리밍 파이프라인에서 TTS 요청을 병렬로 보내다가 ElevenLabs API의 동시 연결 한도를 초과하면, 모든 요청이 실패하여 오디오 청크가 0이 되었습니다.
+
+**해결**
+`asyncio.Semaphore`로 동시 요청 수를 제한하였습니다. 기본으로 설정되어 있는 값은 5로, 별도의 환경변수로 조정이 가능한 수치입니다 ([6ddc503](https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games/commit/6ddc503)).
+
+</details>
+
+---
+
 ## 📂 저장소 구조
 
 ```
@@ -219,3 +291,20 @@ python -m client.main
 # MOS 오프라인 평가 (results/audio/ 의 WAV 파일 평가)
 python tools/evaluate_mos.py
 ```
+
+---
+
+## 📄 라이선스 및 기여
+
+이 프로젝트의 코드는 [MIT License](LICENSE) 하에 배포됩니다. 단, 아래 외부 코드 및 모델은 각 원저작자의 라이선스를 따릅니다.
+
+| 구성 요소 | 출처 | 라이선스 | 비고 |
+|---|---|---|---|
+| `nisqa/` | [gabrielmittag/NISQA](https://github.com/gabrielmittag/NISQA) | 코드: MIT ([nisqa/LICENSE](nisqa/LICENSE)) | 원본 코드를 그대로 포함 |
+| NISQA 가중치 (`weights/nisqa.tar`) | 상동 | CC BY-NC-SA 4.0 | 저장소 미포함, 직접 다운로드 |
+| UTMOS22 | [tarepan/SpeechMOS](https://github.com/tarepan/SpeechMOS) (원본: [sarulab-speech/UTMOS22](https://github.com/sarulab-speech/UTMOS22)) | MIT | `torch.hub`로 실행 시 자동 다운로드 |
+
+**참고 및 크레딧**
+- G. Mittag, B. Naderi, A. Chehadi, S. Möller, "NISQA: A Deep CNN-Self-Attention Model for Multidimensional Speech Quality Prediction with Crowdsourced Datasets," *Interspeech 2021*.
+- T. Saeki et al., "UTMOS: UTokyo-SaruLab System for VoiceMOS Challenge 2022," *Interspeech 2022*.
+- 이 프로젝트의 일부 코드는 [Claude (Anthropic)](https://claude.ai)의 도움을 받아 작성되었습니다.
