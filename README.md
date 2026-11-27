@@ -28,8 +28,10 @@ NVIDIA ACE, Ubisoft NEO NPC 등 게임 산업에서 LLM 기반 NPC 대화 시스
 
 ### 프로젝트 정보
 
-- **과목**: 정보통신 종합 설게 및 실습
+- **과목**: 정보통신 종합 설계 및 실습
 - **기간**: 2026.03.01. ~ 2026.10.02.
+- **구분**: 졸업논문 / 개인 프로젝트 
+- **지도교수**: 전홍배 교수님
 
 ---
 
@@ -142,7 +144,7 @@ TTS 태스크들이 병렬 실행되어도 `asyncio.Queue` 파이프라인이 �
 ## 📂 저장소 구조
 
 ```
-📁 Capstone_Project/
+📁 Adaptive_Streaming_LLM_TTS_for_Games/
 ├── 📁 server/
 │   ├── main.py                  # 서버 진입점 (uvicorn + tc 대역폭 설정)
 │   ├── connection_manager.py    # FastAPI 앱 + WebSocket 엔드포인트
@@ -167,15 +169,20 @@ TTS 태스크들이 병렬 실행되어도 `asyncio.Queue` 파이프라인이 �
 ├── 📁 tools/
 │   └── evaluate_mos.py          # 오프라인 MOS 배치 평가
 │
-├── 📁 nisqa/                       # NISQA 모델 소스
-├── 📁 weights/                     # 사전 학습 모델 가중치
-├── 📁 results/                     # 실험 결과 JSON + WAV
-└── 📁 test/                        # pytest 테스트
+├── 📁 nisqa/                   # NISQA 모델 소스
+├── 📁 weights/                 # 사전 학습 모델 가중치 (용량 문제로 저장소 미포함)
+├── 📁 results/                 # 실험 결과 JSON + WAV (저장소 미포함)
+└── 📁 test/                    # 모듈별 수동 검증 스크립트
 ```
 
 ---
 
 ## 🛠️ 실행 방법
+
+**실행 환경 조건**
+- 서버: Linux 필요 (`tc netem ` 대역폭 제한 사용, `sudo` 권한)
+- 클라이언트: Windows 필요 (WASAPI 루프백 녹음 사용)
+- OpenRouter API 키, ElevenLabs API 키 필요
 
 ```bash
 git clone https://github.com/ji2nook/Adaptive_Streaming_LLM_TTS_for_Games.git
@@ -183,9 +190,23 @@ cd Adaptive_Streaming_LLM_TTS_for_Games
 
 python -m venv venv
 venv\Scripts\activate        # Windows
+source venv\Scripts\activate
 
 pip install -r requirements.txt
 cp .env.example .env         # LLM_API_KEY, TTS_API_KEY 입력
+```
+
+**NISQA 가중치 준비** (MOS 평가에 필요, 용량 문제로 저장소 미포함)
+
+1. [NISQA Releases](https://github.com/gabrielmittag/NISQA/releases)에서 `nisqa.tar`를 내려받습니다.
+2. 프로젝트 루트에 `weights/` 폴더를 만들고 `weights/nisqa.tar`로 저장합니다.
+3. NISQA 모델 소스는 이미 `nisqa/` 폴더에 포함되어 있어 별도 설치가 필요하지 않습니다.
+
+서버(Linux)에서는 torch를 CPU 버전으로 먼저 설치하면 디스크와 RAM을 아낄 수 있습니다.
+
+```bash
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements-server.txt
 ```
 
 ```bash
